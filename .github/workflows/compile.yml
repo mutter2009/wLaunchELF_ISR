@@ -12,13 +12,12 @@ on:
         required: false
         default: '1'
 
-env:
-  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: "true"
-
 jobs:
   build:
     runs-on: ubuntu-latest
     # 与 israpps 官方 CI 相同的工具链镜像（$PS2SDK 即源码树，含 IOP 工具链与 ps2-packer）
+    # 注意：该镜像基于较老 Alpine（musl 无 pthread_getname_np），只能跑 node20 的
+    # JS actions —— 因此必须用 checkout@v4，且不能设置 FORCE_JAVASCRIPT_ACTIONS_TO_NODE24
     container: ps2dev/ps2dev:v1.0
     steps:
       - name: Install dependencies
@@ -26,7 +25,7 @@ jobs:
           apk add --no-cache make git zip bash
 
       - name: Checkout
-        uses: actions/checkout@v6
+        uses: actions/checkout@v4
       - name: Configure git
         run: |
           git config --global --add safe.directory "$GITHUB_WORKSPACE"
