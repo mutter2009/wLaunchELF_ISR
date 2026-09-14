@@ -15,10 +15,18 @@ on:
         description: '额外编译两个 XFROM 版本'
         required: false
         default: '1'
-      fatfs_cp936:
-        description: '重编 CP936 版 bdmfs_fatfs（中文/日文长文件名）'
+      bg:
+        description: '内置默认背景图（黑屏排障时选 0 可彻底关闭）'
         required: false
+        type: choice
+        options: ['1', '0']
         default: '1'
+      fatfs_mode:
+        description: '文件系统驱动方案（off=用仓库原版驱动）'
+        required: false
+        type: choice
+        options: ['utf8', '936', 'off']
+        default: 'utf8'
 
 env:
   # GitHub 于 2025-09 弃用 Node20 并默认强制 Node24，而 israpps 官方 CI 所用的
@@ -29,58 +37,21 @@ env:
 
 jobs:
   #===========================================================================
-  # Job 1：重编 CP936 版 bdmfs_fatfs.irx
-  #   放在 ps2dev/ps2dev:latest 里跑，原因很实在：
-  #   ps2sdk 2.0.0 自带的 FatFs r0.16 打开 exFAT 后要求 C99
-  #   （ff.h: #error exFAT feature wants C99 or later / typedef QWORD FSIZE_t），
-  #   而 v1.0 老镜像的 iop-gcc 是 GCC 3.2.3，不支持 C99，硬编必然报 Error 1。
-  #   新版镜像的 mipsel-none-elf-gcc 是 GCC 11+，正是 ps2sdk 官方 CI 用的组合。
-  #   产出的是标准 IRX（MIPS R3000 目标码），老镜像里编出来的 ELF 一样能加载。
-  #   continue-on-error：万一这一步挂了，也不会连累出包。
-  #===========================================================================
-  fatfs:
-    name: 1/2 Build CP936 bdmfs_fatfs.irx
-    runs-on: ubuntu-latest
-    container: ps2dev/ps2dev:latest
-    continue-on-error: true
-    steps:
-      - name: Install build tools
-        run: |
-          if command -v apt-get >/dev/null 2>&1; then
-            apt-get update -qq
-            apt-get install -y --no-install-recommends git make gcc
-          else
-            apk add --no-cache git make gcc g++
-          fi
-
-      - name: Checkout
-        uses: actions/checkout@v4
-
-      - name: Configure git
-        run: git config --global --add safe.directory "$GITHUB_WORKSPACE"
-
-      - name: Build CP936 FatFs driver
-        if: ${{ github.event.inputs.fatfs_cp936 == '1' }}
-        run: |
-          chmod +x scripts/ci/patch_fatfs_chinese.sh
-          bash scripts/ci/patch_fatfs_chinese.sh
-
-      - name: Upload bdmfs_fatfs.irx
-        if: ${{ github.event.inputs.fatfs_cp936 == '1' }}
-        uses: actions/upload-artifact@v4
-        with:
-          name: bdmfs_fatfs-cp936
-          path: iop/__precompiled/bdmfs_fatfs.irx
-          if-no-files-found: error
-
-  #===========================================================================
-  # Job 2：编译 wLaunchELF 本体（与 israpps 官方一致的老镜像）
+  # 单 job，只用 israpps 官方的 ps2dev/ps2dev:v1.0 镜像。
+  #
+  #   曾经试过"再加一个 job 在 ps2dev/ps2dev:latest 里重编 FatFs"，实测翻车：
+  #   那个镜像连 bash 都没有（步骤报 "bash: not found"），装依赖 3 秒就完事，
+  #   基本是 Alpine/musl 系，glibc 编出来的 ps2dev 工具链能不能跑都难说。
+  #   所以回到老镜像 + v5 脚本的 pre-C99 补丁这条路：
+  #   FatFs r0.16 开 exFAT 要求 C99（ff.h: #error exFAT feature wants C99 or
+  #   later / typedef QWORD FSIZE_t），v1.0 的 iop-gcc 是 GCC 3.2.3 不支持，
+  #   脚本会自动探测并在 pre-C99 时给 ff.h 打补丁（去掉 #error + 补 QWORD）。
+  #
+  #   Patch 这一步 continue-on-error：万一上游又变了，只是少个中文长文件名，
+  #   不会拖垮出包。后面的 Verify 步骤会把不合格的驱动还原成仓库原版。
   #===========================================================================
   build:
-    name: 2/2 Build wLaunchELF
     runs-on: ubuntu-latest
-    needs: fatfs
-    # israpps 官方 CI 原版镜像：预装 ps2sdk-ports（libjpg/gsKit）、ps2-packer
     container: ps2dev/ps2dev:v1.0
     steps:
       - name: Install dependencies
@@ -94,49 +65,54 @@ jobs:
           git config --global --add safe.directory "$GITHUB_WORKSPACE"
           git fetch --prune --unshallow
 
-      - name: Fetch CP936 FatFs driver
-        if: ${{ github.event.inputs.fatfs_cp936 == '1' }}
+      - name: Patch FatFs driver (${{ github.event.inputs.fatfs_mode }})
+        if: ${{ github.event.inputs.fatfs_mode != 'off' }}
         continue-on-error: true
-        uses: actions/download-artifact@v4
-        with:
-          name: bdmfs_fatfs-cp936
-          path: /tmp/fatfs-cp936
+        env:
+          FATFS_MODE: ${{ github.event.inputs.fatfs_mode }}
+        run: |
+          chmod +x scripts/ci/patch_fatfs_chinese.sh
+          bash scripts/ci/patch_fatfs_chinese.sh
 
-      - name: Install CP936 FatFs driver
-        if: ${{ github.event.inputs.fatfs_cp936 == '1' }}
+      - name: Verify FatFs driver
         run: |
           set -u
-          SRC="$(find /tmp/fatfs-cp936 -name bdmfs_fatfs.irx 2>/dev/null | head -1 || true)"
-          if [ -z "$SRC" ]; then
-            echo "WARN: 未拿到 CP936 版 bdmfs_fatfs.irx，沿用仓库内的原版驱动。"
-            echo "      （中文长文件名不会生效，其余功能不受影响）"
+          IRX="iop/__precompiled/bdmfs_fatfs.irx"
+          MARK="iop/__precompiled/.a9vg_fatfs_ok"
+          if [ ! -f "$MARK" ]; then
+            echo "WARN: FatFs 重编没有成功，使用仓库原版驱动。"
+            echo "      （只是没有中文长文件名，其余功能不受影响，ELF 照常出包）"
+            [ -f "$IRX" ] && git checkout -- "$IRX" || true
             exit 0
           fi
-          SIZE=$(wc -c < "$SRC" | tr -d ' ')
-          echo "downloaded $SRC ($SIZE bytes)"
-          if [ "$SIZE" -lt 120000 ]; then
-            echo "WARN: 体积不到 120000 字节，看起来不是 CP936 版本，放弃替换。"
+          SIZE=$(wc -c < "$IRX" | tr -d ' ')
+          echo "bdmfs_fatfs.irx = $SIZE bytes (仓库原版 37724)"
+          if [ "$SIZE" -lt 20000 ]; then
+            echo "WARN: 体积异常，疑似坏文件，还原成仓库原版"
+            git checkout -- "$IRX"
+            rm -f "$MARK"
             exit 0
           fi
-          mkdir -p iop/__precompiled
-          cp -f "$SRC" iop/__precompiled/bdmfs_fatfs.irx
-          echo "OK: 已替换为 CP936 版驱动（$(wc -c < iop/__precompiled/bdmfs_fatfs.irx) bytes）"
+          echo "OK: 将使用重编后的驱动（模式 ${{ github.event.inputs.fatfs_mode }}）"
+          echo "======================================================"
+          echo " 本轮构建参数: BG=${{ github.event.inputs.bg }}  FATFS_MODE=${{ github.event.inputs.fatfs_mode }}"
+          echo "======================================================"
 
       - name: Build 1/3  BOOT-EXFAT-MX4SIO.ELF
         run: |
-          make rebuild EXFAT=${{ github.event.inputs.exfat }} MX4SIO=${{ github.event.inputs.mx4sio }}
+          make rebuild EXFAT=${{ github.event.inputs.exfat }} MX4SIO=${{ github.event.inputs.mx4sio }} BG=${{ github.event.inputs.bg }}
           mkdir -p out && cp -f BOOT*.ELF out/
 
       - name: Build 2/3  BOOT-EXFAT-MX4SIO-XFROM.ELF
         if: ${{ github.event.inputs.xfrom == '1' }}
         run: |
-          make rebuild EXFAT=1 MX4SIO=1 XFROM=1
+          make rebuild EXFAT=1 MX4SIO=1 XFROM=1 BG=${{ github.event.inputs.bg }}
           mkdir -p out && cp -f BOOT*.ELF out/
 
       - name: Build 3/3  BOOT-EXFAT-MMCE-XFROM.ELF
         if: ${{ github.event.inputs.xfrom == '1' }}
         run: |
-          make rebuild EXFAT=1 MMCE=1 XFROM=1
+          make rebuild EXFAT=1 MMCE=1 XFROM=1 BG=${{ github.event.inputs.bg }}
           mkdir -p out && cp -f BOOT*.ELF out/
 
       - name: Upload ELF
