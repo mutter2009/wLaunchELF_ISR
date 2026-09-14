@@ -488,7 +488,7 @@ void setScrTmp(const char *msg0, const char *msg1)
 	y = Menu_title_y;
 	printXY(setting->Menu_Title, x, y, setting->color[COLOR_TEXT], TRUE, 0);
 	// A9VG汉化版：右上角标题加入“A9VG汉化”字样，先量宽再左移，保证完整显示
-	sprintf(temp_txt, " \xff\x34 A9VG汉化 wLaunchELF %s \xff\x34", ULE_VERSION);
+	sprintf(temp_txt, " \xff\x34 wLaunchELF %s A9VG汉化版 \xff\x34", ULE_VERSION);
 	// printXY(..., draw=FALSE) 只推进 x 不绘制，用它精确量出实际占用宽度
 	title_w = printXY(temp_txt, SCREEN_MARGIN, y, setting->color[COLOR_FRAME], FALSE, 0) - SCREEN_MARGIN;
 	tx = SCREEN_WIDTH - SCREEN_MARGIN - TITLE_LEFT_SHIFT - title_w;

@@ -3502,6 +3502,32 @@ static void abbrevForDisplay(char *s, int maxCells)
 	strcpy(&s[i], "~");
 }
 
+// A9VG汉化版：按 Shift-JIS 显示宽度截断存档标题（全角=2格，半角=1格），超出加 '~'
+static void abbrevSJIS(unsigned char *s, int maxCells)
+{
+	int i = 0, w = 0;
+	if (maxCells < 2)
+		maxCells = 2;
+	while (s[i]) {
+		int cw;
+		if ((s[i] & 0x80) && s[i + 1]) {
+			cw = 2;
+		} else {
+			cw = 1;
+		}
+		if (w + cw > maxCells - 1)
+			break;
+		w += cw;
+		if (cw == 2) {
+			i += 2;
+		} else {
+			i += 1;
+		}
+	}
+	s[i] = '~';
+	s[i + 1] = '\0';
+}
+
 static const struct {
 	const char *dev;
 	const char *alias;
@@ -3962,7 +3988,7 @@ int getFilePath(char *out, int cnfmode)
 	nclipFiles = 0;
 	browser_cut = 0;
 
-	file_show = 2;  //A9VG汉化版：默认显示存档标题（已内置 ELISA 字体，可显示日文）
+	file_show = 1;  //A9VG汉化版：默认显示原始文件名 + 详细信息，避免进入记忆卡时逐个读取标题导致缓慢
 	file_sort = 1;
 
 	font_height = FONT_HEIGHT;
@@ -4440,6 +4466,7 @@ int getFilePath(char *out, int cnfmode)
 
 				else if ((file_show == 2) && files[top + i].title[0] != 0) {
 					mcTitle = files[top + i].title;
+					name_limit = 43 * 8;  //A9VG汉化版：存档标题也按“文件名+详情”列宽限制
 				} else {  //Show normal file/folder names
 					// A9VG汉化版：根目录设备名显示为“中文 (英文原名)”
 					if (path[0] == 0)
@@ -4457,15 +4484,18 @@ int getFilePath(char *out, int cnfmode)
 
 					if (files[top + i].stats.AttrFile & sceMcFileAttrSubdir)
 						name_end -= 1;             //For folders, reserve one character for final '/'
-					if (dispStrWidth(tmp) > name_end)      //Is name too long for clean display ?
+					if (mcTitle == NULL && dispStrWidth(tmp) > name_end)      //Is name too long for clean display ?
 						abbrevForDisplay(tmp, name_end);  //A9VG汉化版：按显示宽度截断，汉字不会被误截
 				}
 
-				if (files[top + i].stats.AttrFile & sceMcFileAttrSubdir)
+				if (mcTitle == NULL && (files[top + i].stats.AttrFile & sceMcFileAttrSubdir))
 					strcat(tmp, "/");
-				if (mcTitle != NULL)
-					printXY_sjis(mcTitle, x + 4, y, color, TRUE);
-				else
+				if (mcTitle != NULL) {
+					// A9VG汉化版：复制标题并截断到列宽，超出部分以 '~' 结尾
+					strcpy(tmp, (const char *)mcTitle);
+					abbrevSJIS((unsigned char *)tmp, name_limit / 8);
+					printXY_sjis((unsigned char *)tmp, x + 4, y, color, TRUE);
+				} else
 					printXY(tmp, x + 4, y, color, TRUE, name_limit);
 				if (file_show > 0) {
 					//					unsigned int size = files[top+i].stats.fileSizeByte;
