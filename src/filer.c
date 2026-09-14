@@ -63,8 +63,10 @@ int latestMount = -1;
 int vmcMounted[2] = {0, 0};                          //flags true for mounted VMC false for unmounted
 int vmc_PartyIndex[2] = {-1, -1};                    //PFS index for each VMC, unless -1
 int Party_vmcIndex[MOUNT_LIMIT] = {-1, -1, -1, -1};  //VMC for each PFS, unless -1
-unsigned char *elisaFnt = NULL;
-int elisa_failed = FALSE;  //Set at failure to load font, cleared at browser entry
+// A9VG汉化版：日文存档标题所需 ELISA100.FNT 已内置(src/font_elisa.c)，无需外部文件
+extern const unsigned char font_elisa_builtin[55016];
+unsigned char *elisaFnt = (unsigned char *)font_elisa_builtin;
+int elisa_failed = TRUE;   //已内置字体，不再尝试加载 uLE:/ELISA100.FNT
 u64 freeSpace;
 int mcfreeSpace;
 int mctype_PSx;  //dlanor: Needed for proper scaling of mcfreespace
@@ -3450,6 +3452,110 @@ int keyboard2(char *out, int max)
 //------------------------------
 //endfunc keyboard2  (commented out except in testing)
 //--------------------------------------------------------------
+//--------------------------------------------------------------
+// A9VG汉化版 开始：多字节显示宽度计算 & 根目录设备中文别名
+//--------------------------------------------------------------
+extern unsigned int decode_any(const unsigned char *s, int *nbytes);
+
+static int dispCharBytes(const char *s)
+{
+	if (((unsigned char)s[0]) == 0xFF && s[1] >= '0' && s[1] <= '=')
+		return 2;                       // 手柄按键图标序列 \xFFn
+	if (((unsigned char)s[0]) < 0x80)
+		return 1;                       // 纯 ASCII
+	{
+		int nb = 1;
+		decode_any((const unsigned char *)s, &nb);
+		if (nb < 1)
+			nb = 1;
+		if (nb > 4)
+			nb = 4;
+		return nb;
+	}
+}
+
+static int dispStrWidth(const char *s)
+{
+	int i, w = 0;
+	for (i = 0; s[i];) {
+		int n = dispCharBytes(&s[i]);
+		w += (n == 1) ? 1 : 2;          // 中文/日文/按键图标按 2 个字符格宽
+		i += n;
+	}
+	return w;
+}
+
+// 按“显示宽度”截断并在末尾加 '~'，不会把多字节汉字切成半截
+static void abbrevForDisplay(char *s, int maxCells)
+{
+	int i, w = 0;
+	if (maxCells < 2)
+		maxCells = 2;
+	for (i = 0; s[i];) {
+		int n = dispCharBytes(&s[i]);
+		int cw = (n == 1) ? 1 : 2;
+		if (w + cw > maxCells - 1)
+			break;
+		w += cw;
+		i += n;
+	}
+	strcpy(&s[i], "~");
+}
+
+static const struct {
+	const char *dev;
+	const char *alias;
+} device_alias_cn[] = {
+	{"mc0:",      "记忆卡0 (mc0)"},
+	{"mc1:",      "记忆卡1 (mc1)"},
+	{"mmce0:",    "MMCE 存储卡0 (mmce0)"},
+	{"mmce1:",    "MMCE 存储卡1 (mmce1)"},
+	{"hdd0:",     "硬盘 (hdd0)"},
+	{"dvr_hdd0:", "DVR 硬盘 (dvr_hdd0)"},
+	{"xfrom0:",   "PSX 存储 (xfrom0)"},
+	{"cdfs:",     "光盘 (cdfs)"},
+	{"host:",     "网络主机 (host)"},
+	{"vmc0:",     "虚拟记忆卡0 (vmc0)"},
+	{"vmc1:",     "虚拟记忆卡1 (vmc1)"},
+	{"mx4sio:",   "MX4SIO 存储卡"},
+	{NULL, NULL}
+};
+
+// 只影响根目录设备列表的显示文字，进入设备时仍使用原始设备名
+static void rootDisplayName(const char *name, char *out)
+{
+	int i;
+	char dname[16];
+
+	strncpy(dname, name, sizeof(dname) - 1);
+	dname[sizeof(dname) - 1] = 0;
+
+#ifdef MX4SIO
+	if ((!strncmp(dname, "mass", 4)) &&
+	    (dname[4] == ('0' + mx4sio_idx) || (mx4sio_idx == 0 && dname[4] == ':')))
+		strcpy(dname, "mx4sio:");
+#endif
+
+	for (i = 0; device_alias_cn[i].dev != NULL; i++) {
+		if (!strcmp(dname, device_alias_cn[i].dev)) {
+			strcpy(out, device_alias_cn[i].alias);
+			return;
+		}
+	}
+
+	if (!strncmp(dname, "mass", 4)) {          // USB 大容量存储设备
+		if (dname[4] == ':')
+			strcpy(out, "USB 存储 (mass)");
+		else
+			sprintf(out, "USB 存储 (mass%c)", dname[4]);
+		return;
+	}
+
+	strcpy(out, name);
+}
+//--------------------------------------------------------------
+// A9VG汉化版 结束
+//--------------------------------------------------------------
 int setFileList(const char *path, const char *ext, FILEINFO *files, int cnfmode)
 {
 	int nfiles, i, j, ret;
@@ -3856,7 +3962,7 @@ int getFilePath(char *out, int cnfmode)
 	nclipFiles = 0;
 	browser_cut = 0;
 
-	file_show = 1;
+	file_show = 2;  //A9VG汉化版：默认显示存档标题（已内置 ELISA 字体，可显示日文）
 	file_sort = 1;
 
 	font_height = FONT_HEIGHT;
@@ -4335,20 +4441,11 @@ int getFilePath(char *out, int cnfmode)
 				else if ((file_show == 2) && files[top + i].title[0] != 0) {
 					mcTitle = files[top + i].title;
 				} else {  //Show normal file/folder names
-#ifdef MX4SIO
-					if (path[0] == 0) { // we are on root. apply the unique "alias" here
-						if ((!strncmp(files[top + i].name, "mass", 4)) //
-						&& (files[top + i].name[4] == ('0' + mx4sio_idx) || (mx4sio_idx == 0 && files[top + i].name[4] == ':')) //index corresponds to mx4sio index, also assume that if device path index 4 is equal to ':' then it is index 0
-						)
-							strcpy(tmp, "mx4sio:");
-						else 
-							strcpy(tmp, files[top + i].name);
-				} else {
-					strcpy(tmp, files[top + i].name);
-				}
-#else
-				strcpy(tmp, files[top + i].name);
-#endif
+					// A9VG汉化版：根目录设备名显示为“中文 (英文原名)”
+					if (path[0] == 0)
+						rootDisplayName(files[top + i].name, tmp);
+					else
+						strcpy(tmp, files[top + i].name);
 					if (file_show > 0) {  //Does display mode include file details ?
 						name_limit = 43 * 8;
 					} else {  //Filenames are shown without file details
@@ -4360,10 +4457,8 @@ int getFilePath(char *out, int cnfmode)
 
 					if (files[top + i].stats.AttrFile & sceMcFileAttrSubdir)
 						name_end -= 1;             //For folders, reserve one character for final '/'
-					if (strlen(tmp) > name_end) {  //Is name too long for clean display ?
-						tmp[name_end - 1] = '~';   //indicate filename abbreviation
-						tmp[name_end] = 0;         //abbreviate name length to make room for details
-					}
+					if (dispStrWidth(tmp) > name_end)      //Is name too long for clean display ?
+						abbrevForDisplay(tmp, name_end);  //A9VG汉化版：按显示宽度截断，汉字不会被误截
 				}
 
 				if (files[top + i].stats.AttrFile & sceMcFileAttrSubdir)

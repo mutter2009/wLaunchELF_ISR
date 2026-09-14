@@ -33,7 +33,7 @@ enum {
 	DEF_MENU_FRAME = TRUE,
 	DEF_MENU = TRUE,
 	DEF_NUMCNF = 1,
-	DEF_SWAPKEYS = TRUE,   // A9VG汉化版：圆圈(O)为确认键
+	DEF_SWAPKEYS = FALSE,  // A9VG汉化版：保持原版默认，圆圈(O)=确定、叉(X)=取消
 	DEF_HOSTWRITE = FALSE,
 	DEF_BRIGHT = 50,
 	DEF_POPUP_OPAQUE = FALSE,

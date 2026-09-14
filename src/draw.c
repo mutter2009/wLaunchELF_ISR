@@ -21,6 +21,14 @@ extern void drawCharCN(int idx, int x, int y, u64 colour);
 extern unsigned int decode_any(const unsigned char *s, int *nbytes);
 extern int cn_glyph_width;   // font_cn.c 提供（16，CJK 字模宽度）
 
+//--------------------------------------------------------------
+// A9VG汉化版：内置默认背景图（src/bg_jpg.c，640x480 JPEG）
+//   LAUNCHELF.CNF 未指定 skin / GUI_skin 时自动使用，实现“默认开启背景”。
+//   若在配置里另外选择了 JPG，则以用户选择为准。
+//--------------------------------------------------------------
+extern const unsigned char bg_jpg_builtin[];
+extern const unsigned int bg_jpg_builtin_size;
+
 char LastMessage[MAX_TEXT_LINE + 2];
 
 int Menu_start_x = SCREEN_MARGIN + LINE_THICKNESS + FONT_WIDTH;
@@ -435,17 +443,54 @@ void RotateBitmap(u8 *InBuff, u16 Width, u16 Height, u8 *OutBuff, int Way)
 } /* end RotateBitmap */
 
 //--------------------------------------------------------------
+//--------------------------------------------------------------
+// A9VG汉化版：按“显示宽度”计算字符串占用的字符格数
+// （中文/日文按 2 格，\xFFn 按键图标按 2 格，ASCII 按 1 格）
+//--------------------------------------------------------------
+static int utf8DispWidth(const char *s) __attribute__((unused));
+static int utf8DispWidth(const char *s)
+{
+	int i, w = 0;
+	for (i = 0; s[i];) {
+		if (((unsigned char)s[i]) == 0xFF && s[i + 1] >= '0' && s[i + 1] <= '=') {
+			w += 2;
+			i += 2;
+			continue;
+		}
+		if (((unsigned char)s[i]) < 0x80) {
+			w += 1;
+			i += 1;
+			continue;
+		}
+		if (((unsigned char)s[i]) >= 0xF0) { w += 2; i += 4; continue; }
+		if (((unsigned char)s[i]) >= 0xE0) { w += 2; i += 3; continue; }
+		if (((unsigned char)s[i]) >= 0xC0) { w += 1; i += 2; continue; }
+		w += 1;
+		i += 1;
+	}
+	return w;
+}
+
+// A9VG汉化版：右上角标题整体向左偏移的像素数（40px = 5 个字符宽）
+// 目的：标题不再紧贴屏幕右缘，配合背景图也不会被切掉。
+#define TITLE_LEFT_SHIFT 40
+
 void setScrTmp(const char *msg0, const char *msg1)
 {
-	int x, y;
-	char temp_txt[64];
+	int x, y, tx, title_w;
+	char temp_txt[128];
 
 	x = SCREEN_MARGIN;
 	y = Menu_title_y;
 	printXY(setting->Menu_Title, x, y, setting->color[COLOR_TEXT], TRUE, 0);
-	sprintf(temp_txt, " \xff\x34 LaunchELF %s \xff\x34", ULE_VERSION);
-	printXY(temp_txt, SCREEN_WIDTH - SCREEN_MARGIN - FONT_WIDTH * strlen(temp_txt), y,
-	        setting->color[COLOR_FRAME], TRUE, 0);
+	// A9VG汉化版：右上角标题加入“A9VG汉化”字样，先量宽再左移，保证完整显示
+	sprintf(temp_txt, " \xff\x34 A9VG汉化 wLaunchELF %s \xff\x34", ULE_VERSION);
+	// printXY(..., draw=FALSE) 只推进 x 不绘制，用它精确量出实际占用宽度
+	title_w = printXY(temp_txt, SCREEN_MARGIN, y, setting->color[COLOR_FRAME], FALSE, 0) - SCREEN_MARGIN;
+	tx = SCREEN_WIDTH - SCREEN_MARGIN - TITLE_LEFT_SHIFT - title_w;
+	if (tx < SCREEN_MARGIN)  // 万一标题过长，宁可顶到左边也不切掉尾部
+		tx = SCREEN_MARGIN;
+	printXY(temp_txt, tx, y, setting->color[COLOR_FRAME], TRUE, 0);
 
 	strncpy(LastMessage, msg0, MAX_TEXT_LINE);
 	LastMessage[MAX_TEXT_LINE] = '\0';
@@ -656,6 +701,61 @@ void updateScreenMode(void)
 	gsKit_set_display_offset(gsGlobal, setting->screen_x, setting->screen_y);
 }
 //--------------------------------------------------------------
+// A9VG汉化版：大小写无关字符串比较（避免依赖 strings.h）
+//--------------------------------------------------------------
+static int strEqCI(const char *a, const char *b)
+{
+	while (*a && *b) {
+		int ca = *a, cb = *b;
+		if (ca >= 'A' && ca <= 'Z')
+			ca += 32;
+		if (cb >= 'A' && cb <= 'Z')
+			cb += 32;
+		if (ca != cb)
+			return 0;
+		a++;
+		b++;
+	}
+	return *a == *b;
+}
+//--------------------------------------------------------------
+// A9VG汉化版：加载内置默认背景图（与 BACKGROUND_PIC 走同一套缩放/上传流程）
+//--------------------------------------------------------------
+static void loadBuiltinSkin(void)
+{
+	jpgData *Jpg;
+	u8 *ImgData;
+
+	if (bg_jpg_builtin_size == 0)
+		return;
+
+	Jpg = jpgOpenRAW((u8 *)bg_jpg_builtin, (int)bg_jpg_builtin_size, JPG_WIDTH_FIX);
+	if (Jpg == NULL)
+		return;
+
+	if ((ImgData = memalign(64, Jpg->width * Jpg->height * (Jpg->bpp / 8))) > 0) {
+		if ((jpgReadImage(Jpg, ImgData)) != -1) {
+			if ((ScaleBitmap(ImgData, Jpg->width, Jpg->height, (void *)&TexSkin.Mem, SCREEN_WIDTH, SCREEN_HEIGHT)) != 0) {
+				TexSkin.PSM = GS_PSM_CT24;
+				TexSkin.VramClut = 0;
+				TexSkin.Clut = NULL;
+				TexSkin.Width = SCREEN_WIDTH;
+				TexSkin.Height = SCREEN_HEIGHT;
+				TexSkin.Filter = GS_FILTER_NEAREST;
+				gsGlobal->CurrentPointer = 0x140000;
+				TexSkin.Vram = gsKit_vram_alloc(gsGlobal,
+				                                gsKit_texture_size(TexSkin.Width, TexSkin.Height, TexSkin.PSM),
+				                                GSKIT_ALLOC_USERBUFFER);
+				gsKit_texture_upload(gsGlobal, &TexSkin);
+				free(TexSkin.Mem);
+				testskin = 1;
+			} /* end if */
+		}     /* end if((jpgReadImage(...)) != -1) */
+		free(ImgData);
+	} /* end if( (ImgData = memalign(...)) > 0 ) */
+	jpgClose(Jpg);
+}
+//--------------------------------------------------------------
 void loadSkin(int Picture, char *Path, int ThumbNum)
 {
 	char tmpPath[MAX_PATH], skinpath[MAX_PATH];
@@ -686,6 +786,14 @@ void loadSkin(int Picture, char *Path, int ThumbNum)
 	FILE *File = fopen(skinpath, "r");
 
 	PicW = 0, PicH = 0, PicCoeff = 0;
+
+	// A9VG汉化版：未指定（或找不到）背景图时改用内置背景图，实现“默认开启背景”。
+	//   在系统配置里把 skin 设为 none / off 可彻底关闭背景。
+	if (Picture == BACKGROUND_PIC && File == NULL) {
+		if (tmpPath[0] == '\0' || strEqCI(tmpPath, "builtin") || strEqCI(tmpPath, "default"))
+			loadBuiltinSkin();
+		return;
+	}
 
 	if (File != NULL) {
 
@@ -1062,18 +1170,20 @@ int printXY(const char *s, int x, int y, u64 colour, int draw, int space)
 		if ((c2 < '0') || (c2 > '='))
 			continue;
 		c1 = (c2 - '0') * 2 + 0x100;
-		if (draw) {
-			//expand sequence �0=Circle  �1=Cross  �2=Square  �3=Triangle  �4=FilledBox
-			//"\xff:"=Pad_Right  "\xff;"=Pad_Down  "\xff<"=Pad_Left  "\xff="=Pad_Up
+		//expand sequence �0=Circle  �1=Cross  �2=Square  �3=Triangle  �4=FilledBox
+		//"\xff:"=Pad_Right  "\xff;"=Pad_Down  "\xff<"=Pad_Left  "\xff="=Pad_Up
+		// A9VG汉化版：把 x 的推进移到 if(draw) 之外，
+		// 这样 printXY(..., draw=FALSE) 也能正确“量出”字符串宽度。
+		if (draw)
 			drawChar(c1, x, y, colour);
-			x += 8;
-			if (x > SCREEN_WIDTH - SCREEN_MARGIN - FONT_WIDTH)
-				break;
+		x += 8;
+		if (x > SCREEN_WIDTH - SCREEN_MARGIN - FONT_WIDTH)
+			break;
+		if (draw)
 			drawChar(c1 + 1, x, y, colour);
-			x += 8;
-			if (x > SCREEN_WIDTH - SCREEN_MARGIN - FONT_WIDTH)
-				break;
-		}
+		x += 8;
+		if (x > SCREEN_WIDTH - SCREEN_MARGIN - FONT_WIDTH)
+			break;
 	}  // ends while(1)
 	return x;
 }
