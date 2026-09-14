@@ -34,30 +34,23 @@ env:
 
 jobs:
   #===========================================================================
-  # 单 job，参考 wLaunchELF_R3Z 使用 ghcr.io/ps2homebrew/ps2homebrew:main 镜像。
+  # 单 job，使用 israpps 官方 CI 同款 ps2dev/ps2dev:v1.0 镜像。
   #
-  #   该镜像携带更新的 GCC/binutils，能直接编译 ps2sdk master 的 IOP 模块，
-  #   不需要再对 IOP linkfile 做 GCC 3.2.3 兼容补丁。R3Z 已用此镜像稳定构建，
-  #   我们沿用即可。
+  #   该镜像内含与 wLaunchELF_ISR 配套的 ps2sdk 二进制、旧版 libjpg 头文件/库，
+  #   能直接编译 EE 主程序。ps2sdk master 源码仅用于重编 bdmfs_fatfs 驱动，
+  #   重编时显式使用 v1.0 镜像自带的 IOP linkfile，避免 master linkfile 的
+  #   _gp / SUBALIGN 兼容问题。
   #
   #   Patch 这一步不再 continue-on-error：中文长文件名是汉化版核心功能，
   #   若此步骤失败，后面的 Build 不应继续用仓库原版驱动出包。
   #===========================================================================
   build:
     runs-on: ubuntu-latest
-    container: ghcr.io/ps2homebrew/ps2homebrew:main
+    container: ps2dev/ps2dev:v1.0
     steps:
       - name: Install dependencies
         run: |
-          if command -v apk >/dev/null 2>&1; then
-            apk add --no-cache make git zip gcc musl-dev gmp mpfr4 mpc1
-          elif command -v apt-get >/dev/null 2>&1; then
-            apt-get update
-            DEBIAN_FRONTEND=noninteractive apt-get install -y make git zip gcc libc6-dev libgmp10 libmpfr6 libmpc3
-          else
-            echo "No supported package manager found." >&2
-            exit 1
-          fi
+          apk add --no-cache make git zip bash
 
       - name: Checkout
         uses: actions/checkout@v4
