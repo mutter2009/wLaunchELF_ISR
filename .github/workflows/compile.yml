@@ -47,8 +47,9 @@ jobs:
   #   later / typedef QWORD FSIZE_t），v1.0 的 iop-gcc 是 GCC 3.2.3 不支持，
   #   脚本会自动探测并在 pre-C99 时给 ff.h 打补丁（去掉 #error + 补 QWORD）。
   #
-  #   Patch 这一步 continue-on-error：万一上游又变了，只是少个中文长文件名，
-  #   不会拖垮出包。后面的 Verify 步骤会把不合格的驱动还原成仓库原版。
+  #   Patch 这一步不再 continue-on-error：中文长文件名是汉化版核心功能，
+  #   若此步骤失败，后面的 Build 不应继续用仓库原版驱动出包，否则中文长
+  #   文件名依旧截断。失败时会直接红叉，方便定位问题。
   #===========================================================================
   build:
     runs-on: ubuntu-latest
@@ -67,7 +68,6 @@ jobs:
 
       - name: Patch FatFs driver (${{ github.event.inputs.fatfs_mode }})
         if: ${{ github.event.inputs.fatfs_mode != 'off' }}
-        continue-on-error: true
         env:
           FATFS_MODE: ${{ github.event.inputs.fatfs_mode }}
         run: |
