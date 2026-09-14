@@ -1,117 +1,44 @@
-name: Automated-Build
+name: Compile wLaunchELF_ISR (A9VG汉化版)
 
 on:
   workflow_dispatch:
     inputs:
-      make_args:
-        description: pass extra make argumments to control features not explicitly handled by CI
-  push:
-  repository_dispatch:
-    types: [run_build]
+      exfat:
+        description: 'Build with EXFAT+BDM support'
+        required: false
+        default: '1'
+      mx4sio:
+        description: 'Build with MX4SIO (SD slot 2) support'
+        required: false
+        default: '1'
 
 jobs:
   build:
-    strategy:
-      fail-fast: false
-      matrix:
-        eth: ["ETH=0", "ETH=1"]
-        bdmstuff: ["EXFAT=0", "EXFAT=1", "EXFAT=1 MX4SIO=1"]
-        ds34: ["DS34=0", "DS34=1"]
-        mmce: ["MMCE=0", "MMCE=1"]
-        xfrom: ["XFROM=0", "XFROM=1"]
-        exclude:
-          - bdmstuff: "EXFAT=1 MX4SIO=1"
-            mmce: "MMCE=1"
     runs-on: ubuntu-latest
-    container: ps2dev/ps2dev:v1.0
+    container:
+      image: ps2dev/ps2dev:latest
     steps:
+      - name: Install dependencies
+        run: |
+          apk add --no-cache git bash
 
-    - name: Install dependencies
-      run: |
-        apk add make git zip
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+          fetch-depth: 0
 
-    - uses: actions/checkout@v3
-    - run: |
-        git config --global --add safe.directory "$GITHUB_WORKSPACE"
-        git fetch --prune --unshallow
+      - name: Patch FatFs for Chinese long file names (CP936)
+        run: |
+          chmod +x scripts/ci/patch_fatfs_chinese.sh
+          bash scripts/ci/patch_fatfs_chinese.sh
 
-    - name: Compile wLaunchELF
-      run: |
-        make rebuild ${{ matrix.eth }} ${{ matrix.mmce }} ${{ matrix.bdmstuff }} ${{ matrix.ds34 }} ${{ matrix.xfrom }} ${{ github.event.inputs.make_args }}
+      - name: Compile wLaunchELF_ISR
+        run: |
+          make EXFAT=${{ github.event.inputs.exfat }} MX4SIO=${{ github.event.inputs.mx4sio }}
 
-    - name: Upload variants artifact ELF
-      uses: actions/upload-artifact@v4
-      with:
-        name: "WLE-${{ matrix.eth }}-${{ matrix.mmce }}-${{ matrix.bdmstuff }}-${{ matrix.ds34 }}-${{ matrix.xfrom }}"
-        path: |
-            BOOT*.ELF
-
-####################################################### 
-  release:
-    if: github.ref == 'refs/heads/master' || github.ref == 'refs/heads/main'
-    runs-on: ubuntu-latest
-    needs: [build]
-    steps:
-
-    - uses: actions/checkout@v4
-    - run: |
-        git config --global --add safe.directory "$GITHUB_WORKSPACE"
-        git fetch --prune --unshallow
-
-    - name: Download all artifacts
-      uses: actions/download-artifact@v4
-      with:
-        path: WLE/
-        pattern: "WLE-*"
-        merge-multiple: true
-
-    - name: list
-      run: |
-        ls -R
-
-    - name: Create release
-      if: github.ref == 'refs/heads/master'
-      uses: marvinpinto/action-automatic-releases@latest
-      with:
-        repo_token: "${{ secrets.GITHUB_TOKEN }}"
-        automatic_release_tag: "latest"
-        title: "Latest automated build"
-        prerelease: false
-        files: |
-               WLE/*.ELF
-
-    - name: notify on discord
-      if: github.ref == 'refs/heads/master'
-      uses: tsickert/discord-webhook@v5.3.0
-      with:
-        webhook-url: ${{ secrets.DISCORD_FEED }}
-        content: |
-          ## wLaunchELF 4.43x_isr has been updated!
-          ### [Download Page](https://israpps.github.io/projects/wlaunchelf-isr)
-
-    - name: Create release
-      if: github.ref == 'refs/heads/master'
-      uses: marvinpinto/action-automatic-releases@latest
-      with:
-        repo_token: "${{ secrets.GITHUB_TOKEN }}"
-        automatic_release_tag: "language-files"
-        title: "Translations"
-        files: |
-               Lang/*.LNG
-
-  trigger-auto-update:
-    if: github.ref == 'refs/heads/master' || github.ref == 'refs/heads/main'
-    runs-on: ubuntu-latest
-    needs: [release]
-    strategy:
-      matrix:
-        repos: [israpps/FreeMcBoot-Installer, israpps/Funtuna-Fork , israpps/PlayStation2-Basic-BootLoader]
-    steps:
-    - name: trigger israpps auto-update system
-      if: github.ref == 'refs/heads/master' || github.ref == 'refs/heads/main'
-      uses: peter-evans/repository-dispatch@v1
-      with:
-          token: ${{ secrets.IUS }}
-          repository: ${{ matrix.repos }} 
-          event-type: Component_update
-          client-payload: '{"sha": "${{ github.sha }}"}'
+      - name: Upload ELF
+        uses: actions/upload-artifact@v4
+        with:
+          name: BOOT-EXFAT-MX4SIO
+          path: BOOT-EXFAT-MX4SIO.ELF
