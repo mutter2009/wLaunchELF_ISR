@@ -14,11 +14,12 @@ u64 BrightColor;
 int updateScr_1;      //dlanor: flags screen updates for drawScr()
 int updateScr_2;      //dlanor: used for anti-flicker delay in drawScr()
 u64 updateScr_t = 0;  //dlanor: exit time of last drawScr()
-// 中文/日文渲染支持（来自 draw_text.c）
+// 中文/日文渲染支持（来自 draw_text.c / font_cn.c）
 extern int g_useUTF8;
 extern int cn_glyph_index(unsigned int cp);
 extern void drawCharCN(int idx, int x, int y, u64 colour);
 extern unsigned int decode_any(const unsigned char *s, int *nbytes);
+extern int cn_glyph_width;   // font_cn.c 提供（16，CJK 字模宽度）
 
 char LastMessage[MAX_TEXT_LINE + 2];
 
