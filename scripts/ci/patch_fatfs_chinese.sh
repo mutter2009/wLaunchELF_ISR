@@ -1,104 +1,128 @@
-#!/bin/sh
+#!/bin/bash
 #=============================================================================
 # Patch FatFs for Chinese (GBK / CP936) long file names on FAT32 + exFAT
-# (wLaunchELF_ISR 专用版 v3 —— 带强制校验，失败即退出，避免静默编出无效版本)
+# (wLaunchELF_ISR 专用版 v4)
 #-----------------------------------------------------------------------------
-# ISR 架构关键点：embed.make 从仓库内 iop/__precompiled/bdmfs_fatfs.irx 把
-# 文件系统驱动嵌入 ELF（不读 $PS2SDK/iop/irx/）。因此本脚本除了重编安装到
-# $PS2SDK/iop/irx 之外，【必须】把重编产物覆盖到 iop/__precompiled/ 才生效。
+# ISR 架构关键点：embed.make 从仓库内 iop/__precompiled/bdmfs_fatfs.irx 把文件
+# 系统驱动嵌入 ELF（EXFAT=1 与否用的都是同一个文件）。因此必须把重编产物覆盖到
+# iop/__precompiled/ 才生效，只装到 $PS2SDK/iop/irx 是没用的。
 #
-# v3 新增：
-#   * 校验 ps2sdk 源码树里确实存在 iop/fs/bdmfs_fatfs，否则现场 clone
-#   * 用 find 定位编译产物（不再写死 irx/ 子目录）
-#   * 覆盖后强制检查体积：CP869 原版约 37KB，CP936(含码表) 远大于此，
-#     体积没有明显增大就 exit 1，防止再次编出“看不出问题”的无效版本
-#   * 设置 ALLOW_UNPATCHED_FATFS=1 可跳过强制校验（不建议）
+# v3 -> v4 的关键修正（v3 在 ps2dev/ps2dev:v1.0 镜像里必然失败的原因）：
+#   1) v3 克隆的是 ps2sdk master，其 Defs.make 里
+#      IOP_TOOL_PREFIX ?= mipsel-none-elf-
+#      而 v1.0 镜像里的编译器叫 iop-gcc -> make 报 "Error 127: not found"。
+#      v4 会先探测镜像里实际存在的前缀，再通过命令行变量强制指定。
+#   2) ps2sdk master/2.0.0 链接 IRX 需要 host 工具 srxfixup（要用宿主机 cc 编译），
+#      v1.0 镜像默认没有 gcc。workflow 已加 build-base，脚本里也会检测并传 CC。
+#   3) 新版 ps2sdk 默认 -Werror 和 -gz（压缩调试段），老 GCC 会因此报错，
+#      v4 用命令行变量放宽这两项。
+#   4) ps2sdk 版本锁定到 tag 2.0.0（带 iop/fs/bdmfs_fatfs 的稳定发布版），
+#      不再追 master，避免上游改动再次破坏 CI。
+#   5) 只重编 bdmfs_fatfs；bdm/usbmass_bd/usbd 沿用仓库 iop/__precompiled 里的
+#      原版（它们与 CP936 无关，没必要多失败两个环节）。
+#
+# 强制校验：CP869 原版约 37KB；CP936（带 GBK 码表）应明显大于 60000 字节，
+# 体积没变大就 exit 1，防止再次静默编出无效版本。
+# 设置 ALLOW_UNPATCHED_FATFS=1 可跳过该校验（不建议）。
 #=============================================================================
 set -u
 
 echo "=========================================="
-echo "FatFs Chinese LFN patch script (ISR edition v3)"
+echo "FatFs Chinese LFN patch script (ISR edition v4)"
 PS2SDK="${PS2SDK:-/usr/local/ps2dev/ps2sdk}"
-PS2SDKSRC="${PS2SDKSRC:-$PS2SDK}"
 WORKSPACE="${GITHUB_WORKSPACE:-$PWD}"
 ALLOW_UNPATCHED_FATFS="${ALLOW_UNPATCHED_FATFS:-0}"
-export PS2SDK PS2SDKSRC          # 模块 Makefile 需要读取这两个变量
+PS2SDKREF="${PS2SDKREF:-2.0.0}"   # 锁定 ps2sdk 版本
+export PS2SDK
 echo "Using PS2SDK=$PS2SDK"
-echo "Using PS2SDKSRC=$PS2SDKSRC"
 echo "Using WORKSPACE=$WORKSPACE"
+echo "Using PS2SDKREF=$PS2SDKREF"
 echo "=========================================="
 
 # ---------------------------------------------------------------------------
-# 0) 确保 PS2SDKSRC 指向有效的 ps2sdk 源码树，且包含 bdmfs_fatfs 模块
+# 0) 探测工具链前缀（v1.0 老镜像 = iop-，新镜像 = mipsel-none-elf-）
 # ---------------------------------------------------------------------------
-need_clone=0
-if [ ! -f "$PS2SDKSRC/Defs.make" ]; then
-  echo "WARN: '$PS2SDKSRC' does not look like a PS2SDK source tree"
-  need_clone=1
-else
-  if [ ! -f "$PS2SDKSRC/iop/fs/bdmfs_fatfs/Makefile" ]; then
-    echo "WARN: '$PS2SDKSRC' has no iop/fs/bdmfs_fatfs (SDK-only install?)"
-    need_clone=1
-  fi
-fi
+have() { command -v "$1" >/dev/null 2>&1; }
 
-if [ "$need_clone" -eq 1 ]; then
-  for cand in /usr/local/ps2sdk "${RUNNER_TEMP:-/tmp}/ps2sdk-src" /tmp/ps2sdk-src; do
-    [ -n "$cand" ] || continue
-    if [ -f "$cand/Defs.make" ] && [ -f "$cand/iop/fs/bdmfs_fatfs/Makefile" ]; then
-      PS2SDKSRC="$cand"
-      export PS2SDKSRC
-      echo "Using fallback PS2SDKSRC=$PS2SDKSRC"
-      need_clone=0
-      break
-    fi
-  done
-fi
-
-if [ "$need_clone" -eq 1 ]; then
-  echo "No usable PS2SDK source tree; cloning ps2dev/ps2sdk ..."
-  PS2SDKSRC="${RUNNER_TEMP:-/tmp}/ps2sdk-src"
-  export PS2SDKSRC
-  rm -rf "$PS2SDKSRC"
-  git clone --depth 1 https://github.com/ps2dev/ps2sdk.git "$PS2SDKSRC" || {
-    echo "ERROR: failed to clone ps2sdk"
-    exit 1
-  }
-fi
-echo "PS2SDKSRC=$PS2SDKSRC"
-if [ ! -f "$PS2SDKSRC/iop/fs/bdmfs_fatfs/Makefile" ]; then
-  echo "ERROR: iop/fs/bdmfs_fatfs still missing after clone"
+IOPP=""
+for p in mipsel-none-elf- iop-; do
+  if have "${p}gcc"; then IOPP="$p"; break; fi
+done
+if [ -z "$IOPP" ]; then
+  echo "ERROR: neither mipsel-none-elf-gcc nor iop-gcc found in PATH" >&2
+  echo "PATH=$PATH" >&2
   exit 1
 fi
 
+EEP=""
+for p in mips64r5900el-ps2-elf- ee-; do
+  if have "${p}gcc"; then EEP="$p"; break; fi
+done
+
+HOSTCC=cc
+if ! have cc; then
+  if have gcc; then HOSTCC=gcc; else
+    echo "ERROR: no host compiler (cc/gcc) - srxfixup 无法编译" >&2
+    exit 1
+  fi
+fi
+
+echo "IOP tool prefix : $IOPP"
+echo "EE  tool prefix : ${EEP:-<未检测到，交由 Defs.make 默认值>}"
+echo "Host  compiler  : $HOSTCC"
+"$IOPP"gcc --version | head -1 || true
+echo "=========================================="
+
 # ---------------------------------------------------------------------------
-# 1) 确保 FatFs 外部依赖存在
+# 1) 取得含 iop/fs/bdmfs_fatfs 的 ps2sdk 源码树（锁定 tag，保证可复现）
+# ---------------------------------------------------------------------------
+PS2SDKSRC="${RUNNER_TEMP:-/tmp}/ps2sdk-src"
+export PS2SDKSRC
+
+tree_ok() {
+  [ -f "$1/Defs.make" ] && [ -f "$1/iop/fs/bdmfs_fatfs/Makefile" ]
+}
+
+if tree_ok "$PS2SDKSRC"; then
+  echo "Reusing existing ps2sdk source tree at $PS2SDKSRC"
+else
+  rm -rf "$PS2SDKSRC"
+  echo "Cloning ps2dev/ps2sdk ($PS2SDKREF) ..."
+  git clone --depth 1 -b "$PS2SDKREF" https://github.com/ps2dev/ps2sdk.git "$PS2SDKSRC" \
+  || { echo "clone $PS2SDKREF failed, falling back to master"; \
+       rm -rf "$PS2SDKSRC"; \
+       git clone --depth 1 https://github.com/ps2dev/ps2sdk.git "$PS2SDKSRC" || {
+         echo "ERROR: failed to clone ps2sdk"; exit 1; }; }
+fi
+
+if ! tree_ok "$PS2SDKSRC"; then
+  echo "ERROR: $PS2SDKSRC does not contain iop/fs/bdmfs_fatfs"
+  exit 1
+fi
+echo "PS2SDKSRC=$PS2SDKSRC"
+
+# ---------------------------------------------------------------------------
+# 2) 确保 FatFs 外部依赖存在（ps2sdk 2.0.0 官方脚本用的是 fjtrujy/FatFs iop-r0.16）
 # ---------------------------------------------------------------------------
 FATSRC="$PS2SDKSRC/common/external_deps/fatfs"
 
-find_first() {  # $1=name  -> 打印第一个匹配文件路径（可为空）
-  find "$FATSRC" -maxdepth 5 -name "$1" 2>/dev/null | head -1
-}
+find_first() { find "$FATSRC" -maxdepth 5 -name "$1" 2>/dev/null | head -1; }
 
 if [ -z "$(find_first ffconf.h)" ]; then
   echo "FatFs source not found at $FATSRC"
-  if [ -x "$PS2SDKSRC/download_dependencies.sh" ]; then
-    echo "Running download_dependencies.sh ..."
+  if [ -f "$PS2SDKSRC/download_dependencies.sh" ]; then
+    echo "Running ps2sdk's download_dependencies.sh ..."
     ( cd "$PS2SDKSRC" && bash ./download_dependencies.sh ) \
       || echo "WARN: download_dependencies.sh failed, will try direct clone"
-  else
-    echo "download_dependencies.sh not available, using direct clone"
   fi
 fi
 
 if [ -z "$(find_first ffconf.h)" ]; then
-  echo "Cloning FatFs (fjtrujy/FatFs, branch iop-r0.16) ..."
+  echo "Cloning FatFs (fjtrujy/FatFs, branch iop-r0.16) directly ..."
   rm -rf "${FATSRC}_inprogress" "$FATSRC"
   git clone --depth 1 -b iop-r0.16 https://github.com/fjtrujy/FatFs.git "${FATSRC}_inprogress" \
     && mv "${FATSRC}_inprogress" "$FATSRC" || {
-    echo "ERROR: failed to clone FatFs"
-    exit 1
-  }
+    echo "ERROR: failed to clone FatFs"; exit 1; }
 fi
 
 FFCONF_LIST="$(find "$FATSRC" -maxdepth 5 -name ffconf.h 2>/dev/null)"
@@ -110,7 +134,7 @@ echo "Found ffconf.h:"
 echo "$FFCONF_LIST"
 
 # ---------------------------------------------------------------------------
-# 2) 只改宏数值：CP936 / LFN=2 / exFAT=1 / LFN_UNICODE=0
+# 3) 只改宏数值：CP936 / LFN=2 / exFAT=1 / LFN_UNICODE=0
 # ---------------------------------------------------------------------------
 for FFCONF in $FFCONF_LIST; do
   echo "--- Before patch ($FFCONF) ---"
@@ -125,95 +149,52 @@ for FFCONF in $FFCONF_LIST; do
   grep -nE "^#define[[:space:]]+(FF_CODE_PAGE|FF_USE_LFN|FF_FS_EXFAT|FF_LFN_UNICODE)" "$FFCONF" || true
 done
 
-# 确认关键宏真的被改掉了
 if ! grep -hqE "^#define[[:space:]]+FF_CODE_PAGE[[:space:]]+936" $FFCONF_LIST; then
   echo "ERROR: FF_CODE_PAGE was NOT set to 936"
   exit 1
 fi
 
 # ---------------------------------------------------------------------------
-# 3) 触碰源文件，强制 make 重编（防止按时间戳跳过）
+# 4) 重编 bdmfs_fatfs（这是唯一需要 CP936 的模块）
+#    关键：用命令行变量覆盖工具前缀，绕开 Error 127
 # ---------------------------------------------------------------------------
 echo "Touching FatFs sources to force rebuild..."
-find "$FATSRC" -maxdepth 4 -name '*.c' -exec touch {} + 2>/dev/null || true
-find "$FATSRC" -maxdepth 4 -name '*.h' -exec touch {} + 2>/dev/null || true
-touch "$PS2SDKSRC"/iop/fs/bdmfs_fatfs/src/*.c 2>/dev/null || true
+find "$FATSRC" -maxdepth 4 -name '*.[ch]' -exec touch {} + 2>/dev/null || true
 
-# ---------------------------------------------------------------------------
-# 4) 从源码重编存储模块并安装到 $PS2SDK/iop/irx/
-# ---------------------------------------------------------------------------
-mkdir -p "$PS2SDK/iop/irx"
+MAKE_FLAGS="IOP_TOOL_PREFIX=$IOPP CC=$HOSTCC"
+MAKE_FLAGS="$MAKE_FLAGS IOP_WARNFLAGS=-Wall IOP_DBGINFOFLAGS=-gdwarf-2"
+[ -n "$EEP" ] && MAKE_FLAGS="$MAKE_FLAGS EE_TOOL_PREFIX=$EEP"
+echo "make flags: $MAKE_FLAGS"
 
-rebuild_module() {
-  mod="$1"; name="$2"
-  echo "Building $mod ..."
-  if make -C "$PS2SDKSRC/$mod" all 2>&1; then
-    echo "  OK: built $mod"
-  else
-    echo "  ERROR: build failed for $mod"
-    return 1
-  fi
-  # 用 find 定位产物，兼容 irx/ 子目录或直接放在模块根目录的布局
-  src_irx="$(find "$PS2SDKSRC/$mod" -maxdepth 2 -name "$name.irx" 2>/dev/null | head -1)"
-  if [ -z "$src_irx" ]; then
-    echo "  ERROR: $name.irx not found under $PS2SDKSRC/$mod"
-    return 1
-  fi
-  echo "  built: $src_irx ($(wc -c < "$src_irx") bytes)"
-  if cp -f "$src_irx" "$PS2SDK/iop/irx/$name.irx"; then
-    echo "  OK: installed $name.irx -> $PS2SDK/iop/irx/"
-  else
-    echo "  ERROR: failed to install $name.irx"
-    return 1
-  fi
-}
+MOD="$PS2SDKSRC/iop/fs/bdmfs_fatfs"
+echo "Building $MOD ..."
+if ! make -C "$MOD" all $MAKE_FLAGS; then
+  echo "ERROR: build failed for iop/fs/bdmfs_fatfs"
+  exit 1
+fi
 
-ok=1
-rebuild_module iop/fs/bdm          bdm          || ok=0
-rebuild_module iop/fs/bdmfs_fatfs  bdmfs_fatfs  || ok=0
-rebuild_module iop/usb/usbmass_bd  usbmass_bd   || ok=0
+FATFS_IRX="$(find "$MOD" -maxdepth 2 -name bdmfs_fatfs.irx 2>/dev/null | head -1)"
+if [ -z "$FATFS_IRX" ]; then
+  echo "ERROR: bdmfs_fatfs.irx was not produced"
+  exit 1
+fi
+echo "built: $FATFS_IRX ($(wc -c < "$FATFS_IRX") bytes)"
 
 # ---------------------------------------------------------------------------
 # 5) ISR 架构关键步骤：覆盖仓库内 iop/__precompiled/bdmfs_fatfs.irx
-#    embed.make 从这里嵌入驱动，不覆盖则中文长名修复完全不生效！
 # ---------------------------------------------------------------------------
 PRE="$WORKSPACE/iop/__precompiled"
-FATFS_IRX="$(find "$PS2SDKSRC/iop/fs/bdmfs_fatfs" -maxdepth 2 -name bdmfs_fatfs.irx 2>/dev/null | head -1)"
-if [ -z "$FATFS_IRX" ]; then
-  FATFS_IRX="$PS2SDK/iop/irx/bdmfs_fatfs.irx"
-fi
-
-if [ -f "$FATFS_IRX" ]; then
-  mkdir -p "$PRE"
-  cp -f "$FATFS_IRX" "$PRE/bdmfs_fatfs.irx" \
-    && echo "OK: updated $PRE/bdmfs_fatfs.irx (this is the copy embed.make embeds)"
-else
-  echo "ERROR: rebuilt bdmfs_fatfs.irx not found"
-  ok=0
-fi
+mkdir -p "$PRE"
+cp -f "$FATFS_IRX" "$PRE/bdmfs_fatfs.irx" \
+  && echo "OK: updated $PRE/bdmfs_fatfs.irx (this is the copy embed.make embeds)"
 
 # ---------------------------------------------------------------------------
-# 6) 兜底：若单个模块失败，整体编译 iop 层后再覆盖一次
-# ---------------------------------------------------------------------------
-if [ "$ok" -eq 0 ]; then
-  echo "Falling back to full 'make -C $PS2SDKSRC iop' ..."
-  make -C "$PS2SDKSRC" iop 2>&1 || echo "WARN: 'make iop' failed; check toolchain env"
-  FATFS_IRX="$(find "$PS2SDKSRC/iop/fs/bdmfs_fatfs" -maxdepth 2 -name bdmfs_fatfs.irx 2>/dev/null | head -1)"
-  if [ -n "$FATFS_IRX" ] && [ -f "$FATFS_IRX" ]; then
-    cp -f "$FATFS_IRX" "$PRE/bdmfs_fatfs.irx" && echo "OK: updated precompiled bdmfs_fatfs.irx (fallback)"
-  fi
-fi
-
-# ---------------------------------------------------------------------------
-# 7) 强制校验 + 诊断输出
+# 6) 强制校验 + 诊断输出
 # ---------------------------------------------------------------------------
 echo "=========================================="
-echo "Final IRX files:"
-ls -la "$PS2SDK/iop/irx/bdm.irx" \
-       "$PS2SDK/iop/irx/bdmfs_fatfs.irx" \
-       "$PS2SDK/iop/irx/usbmass_bd.irx" 2>&1 || true
-echo "Repo precompiled copy (embed.make source of truth):"
 ls -la "$PRE/bdmfs_fatfs.irx" 2>&1 || true
+echo "Repo precompiled dir now contains:"
+ls -la "$PRE" 2>/dev/null | head -20
 
 FATAL=0
 if [ ! -f "$PRE/bdmfs_fatfs.irx" ]; then
