@@ -12,21 +12,25 @@ on:
         required: false
         default: '1'
 
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: "true"
+
 jobs:
   build:
     runs-on: ubuntu-latest
-    container:
-      image: ps2dev/ps2dev:latest
+    # 与 israpps 官方 CI 相同的工具链镜像（$PS2SDK 即源码树，含 IOP 工具链与 ps2-packer）
+    container: ps2dev/ps2dev:v1.0
     steps:
       - name: Install dependencies
         run: |
-          apk add --no-cache git bash
+          apk add --no-cache make git zip bash
 
       - name: Checkout
-        uses: actions/checkout@v4
-        with:
-          submodules: recursive
-          fetch-depth: 0
+        uses: actions/checkout@v6
+      - name: Configure git
+        run: |
+          git config --global --add safe.directory "$GITHUB_WORKSPACE"
+          git fetch --prune --unshallow
 
       - name: Patch FatFs for Chinese long file names (CP936)
         run: |
@@ -35,10 +39,10 @@ jobs:
 
       - name: Compile wLaunchELF_ISR
         run: |
-          make EXFAT=${{ github.event.inputs.exfat }} MX4SIO=${{ github.event.inputs.mx4sio }}
+          make rebuild EXFAT=${{ github.event.inputs.exfat }} MX4SIO=${{ github.event.inputs.mx4sio }}
 
       - name: Upload ELF
         uses: actions/upload-artifact@v4
         with:
-          name: BOOT-EXFAT-MX4SIO
-          path: BOOT-EXFAT-MX4SIO.ELF
+          name: wLaunchELF_ISR-A9VG
+          path: BOOT*.ELF
