@@ -14,6 +14,11 @@ u64 BrightColor;
 int updateScr_1;      //dlanor: flags screen updates for drawScr()
 int updateScr_2;      //dlanor: used for anti-flicker delay in drawScr()
 u64 updateScr_t = 0;  //dlanor: exit time of last drawScr()
+// 中文/日文渲染支持（来自 draw_text.c）
+extern int g_useUTF8;
+extern int cn_glyph_index(unsigned int cp);
+extern void drawCharCN(int idx, int x, int y, u64 colour);
+extern unsigned int decode_any(const unsigned char *s, int *nbytes);
 
 char LastMessage[MAX_TEXT_LINE + 2];
 
@@ -1026,14 +1031,30 @@ int printXY(const char *s, int x, int y, u64 colour, int draw, int space)
 
 	i = 0;
 	while ((c1 = (unsigned char)s[i++]) != 0) {
-		if (c1 != 0xFF) {  // Normal character
-			if (draw)
-				drawChar(c1, x, y, colour);
-			x += text_spacing;
+		if (c1 != 0xFF) {  // Normal character (含 UTF-8 / GBK 中文)
+			if (g_useUTF8 && c1 >= 0x80) {
+				// UTF-8 或 GBK 多字节序列 -> 从 font_cn 取汉字
+				int nb;
+				unsigned int cp = decode_any((const unsigned char *)s + i - 1, &nb);
+				int idx = cn_glyph_index(cp);
+				if (draw) {
+					if (idx >= 0)
+						drawCharCN(idx, x, y, colour);
+					else
+						drawChar('_', x, y, colour);
+				}
+				i += nb - 1;          // decode_any 已含首字节，补上剩余续字节
+				x += (cn_glyph_width * text_spacing) / 8;
+			} else {                  // ASCII / 单字节
+				if (draw)
+					drawChar(c1, x, y, colour);
+				x += text_spacing;
+			}
 			if (x > SCREEN_WIDTH - SCREEN_MARGIN - FONT_WIDTH)
 				break;
 			continue;
 		}  //End if for normal character
+
 		// Here we got a sequence starting with 0xFF ('\xff')
 		if ((c2 = (unsigned char)s[i++]) == 0)
 			break;
