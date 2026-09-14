@@ -246,46 +246,58 @@ else
   echo "Compiler supports C99 -> no ff.h patch needed."
 fi
 
+# MAKE_FLAGS 会逐步收集 linkfile 覆盖、工具链前缀等，最后传给 make
+MAKE_FLAGS=""
+
 # ---------------------------------------------------------------------------
 # 5) GCC 3.2.3 兼容补丁：ps2sdk master 的 IOP linkfile 用了 SUBALIGN(16)，
-#    老 ld 不认识，链接时报 "parse error"。把它改回老格式即可。
+#    老 ld 不认识，链接时报 "parse error"；PROVIDE(_gp = ALIGN(...) + 0x7ff0)
+#    里的 ALIGN 表达式老 ld 也算不了，会报 "undefined symbol `_gp'".
+#
+# 策略：不直接修改原 linkfile，而是生成一份修复后的副本，再通过环境变量
+# IOP_LINKFILE 强制 make 使用它，避免 sed/awk 在原文件上"明明改了但没生效"
+# 的疑难杂症。
 # ---------------------------------------------------------------------------
 LINKFILE="$PS2SDKSRC/iop/startup/src/linkfile"
+FIXED_LINKFILE="$PS2SDKSRC/iop/startup/src/linkfile.a9vg"
 if [ -f "$LINKFILE" ]; then
-  echo ">>> Patching IOP linkfile for old binutils (remove SUBALIGN) ..."
+  echo ">>> Preparing IOP linkfile for old binutils ..."
   cp -f "$LINKFILE" "$LINKFILE.orig"
-  sed -i -E 's/([[:space:]]*\.[a-zA-Z0-9_]+[[:space:]]+ALIGN\([0-9]+\)[[:space:]]*):[[:space:]]*SUBALIGN\([0-9]+\)/\1:/g' "$LINKFILE"
-  sed -i -E 's/([[:space:]]*\.[a-zA-Z0-9_]+[[:space:]]*:[[:space:]]*\{[^}]*\}[[:space:]]*):[[:space:]]*SUBALIGN\([0-9]+\)/\1:/g' "$LINKFILE"
+  cp -f "$LINKFILE" "$FIXED_LINKFILE"
+
+  # 0) 打印修改前的 _gp 行，方便排错
+  echo "Original _gp line:"
+  grep -n 'PROVIDE(_gp' "$FIXED_LINKFILE" || true
+
+  # 1) 去掉 SUBALIGN(...)
+  sed -i -E 's/([[:space:]]*\.[a-zA-Z0-9_]+[[:space:]]+ALIGN\([0-9]+\)[[:space:]]*):[[:space:]]*SUBALIGN\([0-9]+\)/\1:/g' "$FIXED_LINKFILE"
+  sed -i -E 's/([[:space:]]*\.[a-zA-Z0-9_]+[[:space:]]*:[[:space:]]*\{[^}]*\}[[:space:]]*):[[:space:]]*SUBALIGN\([0-9]+\)/\1:/g' "$FIXED_LINKFILE"
   # 兜底：再扫一遍，把单独出现的 SUBALIGN(...) 整段删掉
-  sed -i -E 's/[[:space:]]*SUBALIGN\([0-9]+\)//g' "$LINKFILE"
-  if grep -q "SUBALIGN" "$LINKFILE"; then
-    echo "WARN: linkfile still contains SUBALIGN; restoring original"
-    cp -f "$LINKFILE.orig" "$LINKFILE"
+  sed -i -E 's/[[:space:]]*SUBALIGN\([0-9]+\)//g' "$FIXED_LINKFILE"
+  if grep -q "SUBALIGN" "$FIXED_LINKFILE"; then
+    echo "WARN: linkfile still contains SUBALIGN"
   else
     echo "OK: SUBALIGN removed from linkfile."
   fi
 
-  # 老 ld 还无法解析 PROVIDE(_gp = ALIGN(16) + 0x7ff0) 里的 ALIGN 表达式，
-  # 会报 "undefined symbol _gp referenced in expression"。改成用 _fdata 计算。
-  # 用 awk 整行替换，避免 sed 正则因空格差异失败。
-  if grep -qE 'PROVIDE[[:space:]]*\(_gp' "$LINKFILE"; then
-    echo ">>> Patching IOP linkfile _gp for old binutils ..."
-    awk '
-      /PROVIDE[[:space:]]*\(_gp/ {
-        # 保留原行缩进，把整行换成固定形式
-        match($0, /^[[:space:]]*/);
-        printf "%sPROVIDE(_gp = _fdata + 0x7ff0);\n", substr($0, 1, RLENGTH);
-        next;
-      }
-      { print }
-    ' "$LINKFILE" > "$LINKFILE.a9vg" && mv -f "$LINKFILE.a9vg" "$LINKFILE"
-    if grep -qE 'PROVIDE[[:space:]]*\(_gp[[:space:]]*=[[:space:]]*_fdata[[:space:]]*\+[[:space:]]*0x7ff0\)' "$LINKFILE"; then
-      echo "OK: _gp now uses _fdata + 0x7ff0."
-    else
-      echo "ERROR: _gp patch failed; linkfile may have changed upstream"
-      exit 1
-    fi
+  # 2) 把 PROVIDE(_gp = ...) 改成 PROVIDE(_gp = _fdata + 0x7ff0);
+  sed -i -E 's/PROVIDE[[:space:]]*\(_gp[[:space:]]*=[^;]*;/PROVIDE(_gp = _fdata + 0x7ff0);/' "$FIXED_LINKFILE"
+  echo "Patched _gp line:"
+  grep -n 'PROVIDE(_gp' "$FIXED_LINKFILE" || true
+  if grep -qE 'PROVIDE[[:space:]]*\(_gp[[:space:]]*=[[:space:]]*_fdata[[:space:]]*\+[[:space:]]*0x7ff0\)' "$FIXED_LINKFILE"; then
+    echo "OK: _gp now uses _fdata + 0x7ff0."
+  else
+    echo "ERROR: _gp patch failed; linkfile may have changed upstream"
+    exit 1
   fi
+
+  # 3) 同时把原 linkfile 也改掉，保持一致
+  cp -f "$FIXED_LINKFILE" "$LINKFILE"
+
+  # 4) 强制 make 使用修复后的副本
+  export IOP_LINKFILE="$FIXED_LINKFILE"
+  MAKE_FLAGS="$MAKE_FLAGS IOP_LINKFILE=$FIXED_LINKFILE"
+  echo "IOP_LINKFILE=$IOP_LINKFILE"
 fi
 
 # ---------------------------------------------------------------------------
@@ -294,7 +306,7 @@ fi
 echo "Touching FatFs sources to force rebuild..."
 find "$FATSRC" -maxdepth 4 -name '*.[ch]' -exec touch {} + 2>/dev/null || true
 
-MAKE_FLAGS="IOP_TOOL_PREFIX=$IOPP CC=$HOSTCC"
+MAKE_FLAGS="IOP_TOOL_PREFIX=$IOPP CC=$HOSTCC $MAKE_FLAGS"
 MAKE_FLAGS="$MAKE_FLAGS IOP_WARNFLAGS=-Wall IOP_DBGINFOFLAGS=-gdwarf-2"
 [ -n "$EEP" ] && MAKE_FLAGS="$MAKE_FLAGS EE_TOOL_PREFIX=$EEP"
 echo "make flags: $MAKE_FLAGS"
