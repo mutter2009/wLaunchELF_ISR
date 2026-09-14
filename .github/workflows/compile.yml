@@ -4,11 +4,15 @@ on:
   workflow_dispatch:
     inputs:
       exfat:
-        description: 'Build with EXFAT+BDM support'
+        description: 'EXFAT / BDM 支持（USB 中文长文件名必需）'
         required: false
         default: '1'
       mx4sio:
-        description: 'Build with MX4SIO (SD slot 2) support'
+        description: 'MX4SIO（SD 卡）支持'
+        required: false
+        default: '1'
+      xfrom:
+        description: '额外编译两个 XFROM 版本'
         required: false
         default: '1'
 
@@ -42,12 +46,25 @@ jobs:
           chmod +x scripts/ci/patch_fatfs_chinese.sh
           bash scripts/ci/patch_fatfs_chinese.sh
 
-      - name: Compile wLaunchELF_ISR
+      - name: Build 1/3  BOOT-EXFAT-MX4SIO.ELF
         run: |
           make rebuild EXFAT=${{ github.event.inputs.exfat }} MX4SIO=${{ github.event.inputs.mx4sio }}
+          mkdir -p out && cp -f BOOT*.ELF out/
+
+      - name: Build 2/3  BOOT-EXFAT-MX4SIO-XFROM.ELF
+        if: ${{ github.event.inputs.xfrom == '1' }}
+        run: |
+          make rebuild EXFAT=1 MX4SIO=1 XFROM=1
+          mkdir -p out && cp -f BOOT*.ELF out/
+
+      - name: Build 3/3  BOOT-EXFAT-MMCE-XFROM.ELF
+        if: ${{ github.event.inputs.xfrom == '1' }}
+        run: |
+          make rebuild EXFAT=1 MMCE=1 XFROM=1
+          mkdir -p out && cp -f BOOT*.ELF out/
 
       - name: Upload ELF
         uses: actions/upload-artifact@v4
         with:
           name: wLaunchELF_ISR-A9VG
-          path: BOOT*.ELF
+          path: out/*.ELF
