@@ -267,13 +267,23 @@ if [ -f "$LINKFILE" ]; then
 
   # 老 ld 还无法解析 PROVIDE(_gp = ALIGN(16) + 0x7ff0) 里的 ALIGN 表达式，
   # 会报 "undefined symbol _gp referenced in expression"。改成用 _fdata 计算。
-  if grep -qE 'PROVIDE\(_gp[[:space:]]*=[[:space:]]*ALIGN\(' "$LINKFILE"; then
+  # 用 awk 整行替换，避免 sed 正则因空格差异失败。
+  if grep -qE 'PROVIDE[[:space:]]*\(_gp' "$LINKFILE"; then
     echo ">>> Patching IOP linkfile _gp for old binutils ..."
-    sed -i -E 's/PROVIDE\(_gp[[:space:]]*=[[:space:]]*ALIGN\([0-9]+\)[[:space:]]*\+[[:space:]]*0x7ff0\)/PROVIDE(_gp = _fdata + 0x7ff0)/g' "$LINKFILE"
-    if grep -qE 'PROVIDE\(_gp[[:space:]]*=[[:space:]]*_fdata[[:space:]]*\+[[:space:]]*0x7ff0\)' "$LINKFILE"; then
+    awk '
+      /PROVIDE[[:space:]]*\(_gp/ {
+        # 保留原行缩进，把整行换成固定形式
+        match($0, /^[[:space:]]*/);
+        printf "%sPROVIDE(_gp = _fdata + 0x7ff0);\n", substr($0, 1, RLENGTH);
+        next;
+      }
+      { print }
+    ' "$LINKFILE" > "$LINKFILE.a9vg" && mv -f "$LINKFILE.a9vg" "$LINKFILE"
+    if grep -qE 'PROVIDE[[:space:]]*\(_gp[[:space:]]*=[[:space:]]*_fdata[[:space:]]*\+[[:space:]]*0x7ff0\)' "$LINKFILE"; then
       echo "OK: _gp now uses _fdata + 0x7ff0."
     else
-      echo "WARN: _gp patch may have failed, leaving as-is"
+      echo "ERROR: _gp patch failed; linkfile may have changed upstream"
+      exit 1
     fi
   fi
 fi

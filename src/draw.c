@@ -1113,21 +1113,21 @@ void drawChar2(int n, int x, int y, u64 colour)
 {
 	unsigned int i, j;
 	u8 b;
-	float y0, y1;
+	int cx;
+	// 8x8 ELISA -> 12x16: 8 rows @ 2px high = 16px, columns 2,1,2,1,2,1,2,1 = 12px
+	static const int col_w[8] = { 2, 1, 2, 1, 2, 1, 2, 1 };
 
 	updateScr_1 = 1;
 
-	// ELISA100.FNT glyphs are 8x8; upscale to 16x12 (A9VG: wider Japanese glyph).
-	// Width 16px matches the Chinese cell width, height 12px is shorter and avoids
-	// the "narrow glyph + blank padding" look of the old 8x16 render.
 	for (i = 0; i < 8; i++) {
 		b = elisaFnt[n + i];
-		y0 = y + i * 1.5f + 2.0f;      // center the 12px-high glyph in a 16px row
-		y1 = y0 + 1.5f;
+		cx = x;
 		for (j = 0; j < 8; j++) {
 			if (b & 0x80) {
-				gsKit_prim_sprite(gsGlobal, x + j * 2, y0, x + j * 2 + 2, y1, 1, colour);
+				gsKit_prim_sprite(gsGlobal, cx, y + i * 2,
+				                  cx + col_w[j], y + i * 2 + 2, 1, colour);
 			}
+			cx += col_w[j];
 			b = b << 1;
 		}
 	}
@@ -1262,7 +1262,7 @@ int printXY_sjis(const unsigned char *s, int x, int y, u64 colour, int draw)
 					break;
 				default:
 					if (elisaFnt != NULL) {  // elisa font is available ?
-						tmp = y;  // drawChar2 now centers the 12px-high glyph itself
+						tmp = y;  // drawChar2 now renders 12x16, same row height as Chinese
 						// SJIS����EUC�ɕϊ�
 						if (code >= 0xE000)
 							code -= 0x4000;
@@ -1294,8 +1294,8 @@ int printXY_sjis(const unsigned char *s, int x, int y, u64 colour, int draw)
 						if (n >= 0 && n <= 55008) {
 							if (draw)
 								drawChar2(n, x, tmp, colour);
-							// A9VG汉化版：日文字符实际渲染为 16x12，因此推进 16px
-							x += 16;
+							// A9VG汉化版：日文字符渲染为 12x16，推进 12px（比中文 16 窄）
+							x += 12;
 						} else {
 							if (draw)
 								drawChar('_', x, y, colour);
