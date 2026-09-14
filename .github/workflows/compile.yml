@@ -15,6 +15,10 @@ on:
         description: '额外编译两个 XFROM 版本'
         required: false
         default: '1'
+      fatfs_cp936:
+        description: '重编 CP936 版 bdmfs_fatfs（中文/日文长文件名）'
+        required: false
+        default: '1'
 
 env:
   # GitHub 于 2025-09 弃用 Node20 并默认强制 Node24，而 israpps 官方 CI 所用的
@@ -24,10 +28,59 @@ env:
   ACTIONS_ALLOW_USE_UNSECURE_NODE_VERSION: "true"
 
 jobs:
-  build:
+  #===========================================================================
+  # Job 1：重编 CP936 版 bdmfs_fatfs.irx
+  #   放在 ps2dev/ps2dev:latest 里跑，原因很实在：
+  #   ps2sdk 2.0.0 自带的 FatFs r0.16 打开 exFAT 后要求 C99
+  #   （ff.h: #error exFAT feature wants C99 or later / typedef QWORD FSIZE_t），
+  #   而 v1.0 老镜像的 iop-gcc 是 GCC 3.2.3，不支持 C99，硬编必然报 Error 1。
+  #   新版镜像的 mipsel-none-elf-gcc 是 GCC 11+，正是 ps2sdk 官方 CI 用的组合。
+  #   产出的是标准 IRX（MIPS R3000 目标码），老镜像里编出来的 ELF 一样能加载。
+  #   continue-on-error：万一这一步挂了，也不会连累出包。
+  #===========================================================================
+  fatfs:
+    name: 1/2 Build CP936 bdmfs_fatfs.irx
     runs-on: ubuntu-latest
-    # israpps 官方 CI 原版镜像：预装 ps2sdk-ports（libjpg/gsKit）、ps2-packer，
-    # 且 $PS2SDK 即 ps2sdk 源码树（供 patch 脚本重编 bdmfs_fatfs）
+    container: ps2dev/ps2dev:latest
+    continue-on-error: true
+    steps:
+      - name: Install build tools
+        run: |
+          if command -v apt-get >/dev/null 2>&1; then
+            apt-get update -qq
+            apt-get install -y --no-install-recommends git make gcc
+          else
+            apk add --no-cache git make gcc g++
+          fi
+
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Configure git
+        run: git config --global --add safe.directory "$GITHUB_WORKSPACE"
+
+      - name: Build CP936 FatFs driver
+        if: ${{ github.event.inputs.fatfs_cp936 == '1' }}
+        run: |
+          chmod +x scripts/ci/patch_fatfs_chinese.sh
+          bash scripts/ci/patch_fatfs_chinese.sh
+
+      - name: Upload bdmfs_fatfs.irx
+        if: ${{ github.event.inputs.fatfs_cp936 == '1' }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: bdmfs_fatfs-cp936
+          path: iop/__precompiled/bdmfs_fatfs.irx
+          if-no-files-found: error
+
+  #===========================================================================
+  # Job 2：编译 wLaunchELF 本体（与 israpps 官方一致的老镜像）
+  #===========================================================================
+  build:
+    name: 2/2 Build wLaunchELF
+    runs-on: ubuntu-latest
+    needs: fatfs
+    # israpps 官方 CI 原版镜像：预装 ps2sdk-ports（libjpg/gsKit）、ps2-packer
     container: ps2dev/ps2dev:v1.0
     steps:
       - name: Install dependencies
@@ -41,10 +94,33 @@ jobs:
           git config --global --add safe.directory "$GITHUB_WORKSPACE"
           git fetch --prune --unshallow
 
-      - name: Patch FatFs for Chinese long file names (CP936)
+      - name: Fetch CP936 FatFs driver
+        if: ${{ github.event.inputs.fatfs_cp936 == '1' }}
+        continue-on-error: true
+        uses: actions/download-artifact@v4
+        with:
+          name: bdmfs_fatfs-cp936
+          path: /tmp/fatfs-cp936
+
+      - name: Install CP936 FatFs driver
+        if: ${{ github.event.inputs.fatfs_cp936 == '1' }}
         run: |
-          chmod +x scripts/ci/patch_fatfs_chinese.sh
-          bash scripts/ci/patch_fatfs_chinese.sh
+          set -u
+          SRC="$(find /tmp/fatfs-cp936 -name bdmfs_fatfs.irx 2>/dev/null | head -1 || true)"
+          if [ -z "$SRC" ]; then
+            echo "WARN: 未拿到 CP936 版 bdmfs_fatfs.irx，沿用仓库内的原版驱动。"
+            echo "      （中文长文件名不会生效，其余功能不受影响）"
+            exit 0
+          fi
+          SIZE=$(wc -c < "$SRC" | tr -d ' ')
+          echo "downloaded $SRC ($SIZE bytes)"
+          if [ "$SIZE" -lt 120000 ]; then
+            echo "WARN: 体积不到 120000 字节，看起来不是 CP936 版本，放弃替换。"
+            exit 0
+          fi
+          mkdir -p iop/__precompiled
+          cp -f "$SRC" iop/__precompiled/bdmfs_fatfs.irx
+          echo "OK: 已替换为 CP936 版驱动（$(wc -c < iop/__precompiled/bdmfs_fatfs.irx) bytes）"
 
       - name: Build 1/3  BOOT-EXFAT-MX4SIO.ELF
         run: |
