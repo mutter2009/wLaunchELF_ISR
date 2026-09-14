@@ -731,11 +731,19 @@ static int strEqCI(const char *a, const char *b)
 #ifdef A9VG_BG_BUILTIN
 static void loadBuiltinSkin(void)
 {
+	u8 *aligned;
+	size_t bytes = bg_raw_width * bg_raw_height * 3;
+
 	// 背景已预先解码成 640x448 RGB888（src/bg_raw.c），这里直接当纹理上传，
-	// 不走 libjpg、不 malloc、不需要 ScaleBitmap —— 全程无失败点。
-	// 显示时 clrScr() 会把它拉伸到 SCREEN_WIDTH x SCREEN_HEIGHT，
-	// 所以 PAL（512 行）下也会被拉满，只是纵向比例略有变化。
-	TexSkin.Mem = (void *)bg_raw_builtin;
+	// 不走 libjpg、不需要 ScaleBitmap。
+	// DMA/gsKit 需要 64 字节对齐的纹理 buffer，而 const 数组地址不一定对齐，
+	// 所以先 memalign 复制一份，上传后再释放。
+	aligned = memalign(64, bytes);
+	if (!aligned)
+		return;
+	memcpy(aligned, bg_raw_builtin, bytes);
+
+	TexSkin.Mem = aligned;
 	TexSkin.Width = (int)bg_raw_width;
 	TexSkin.Height = (int)bg_raw_height;
 	TexSkin.PSM = GS_PSM_CT24;
@@ -747,6 +755,8 @@ static void loadBuiltinSkin(void)
 	                                gsKit_texture_size(TexSkin.Width, TexSkin.Height, TexSkin.PSM),
 	                                GSKIT_ALLOC_USERBUFFER);
 	gsKit_texture_upload(gsGlobal, &TexSkin);
+	free(aligned);
+	TexSkin.Mem = NULL;
 	testskin = 1;
 }
 #endif /* A9VG_BG_BUILTIN */
@@ -1280,7 +1290,8 @@ int printXY_sjis(const unsigned char *s, int x, int y, u64 colour, int draw)
 						if (n >= 0 && n <= 55008) {
 							if (draw)
 								drawChar2(n, x, tmp, colour);
-							x += 9;
+							// A9VG汉化版：日文字符宽度从 9 加到 12（16x12 风格，比中文 16 窄）
+							x += 12;
 						} else {
 							if (draw)
 								drawChar('_', x, y, colour);

@@ -32,7 +32,9 @@ echo "FatFs Chinese LFN patch script (ISR edition v5)"
 PS2SDK="${PS2SDK:-/usr/local/ps2dev/ps2sdk}"
 WORKSPACE="${GITHUB_WORKSPACE:-$PWD}"
 ALLOW_UNPATCHED_FATFS="${ALLOW_UNPATCHED_FATFS:-0}"
-PS2SDKREF="${PS2SDKREF:-2.0.0}"   # 锁定 ps2sdk 版本，保证可复现
+# ps2dev/ps2sdk 仓库没有 2.0.0 这个 tag，直接用 master（即 r0.16 分支）。
+# 脚本里会再对 master 的 linkfile 做 GCC 3.2.3 兼容补丁。
+PS2SDKREF="${PS2SDKREF:-master}"
 # FATFS_MODE:
 #   936  -> FF_CODE_PAGE=936 + FF_LFN_UNICODE=0，驱动直接吐 GBK 字节（简体中文原生方案）
 #           代价：ffunicode.c 会编进两张 GBK 码表（各约 87KB），IRX 从 37KB 涨到约 210KB，
@@ -245,7 +247,27 @@ else
 fi
 
 # ---------------------------------------------------------------------------
-# 5) 重编 bdmfs_fatfs（这是唯一需要 CP936 的模块）
+# 5) GCC 3.2.3 兼容补丁：ps2sdk master 的 IOP linkfile 用了 SUBALIGN(16)，
+#    老 ld 不认识，链接时报 "parse error"。把它改回老格式即可。
+# ---------------------------------------------------------------------------
+LINKFILE="$PS2SDKSRC/iop/startup/src/linkfile"
+if [ -f "$LINKFILE" ]; then
+  echo ">>> Patching IOP linkfile for old binutils (remove SUBALIGN) ..."
+  cp -f "$LINKFILE" "$LINKFILE.orig"
+  sed -i -E 's/([[:space:]]*\.[a-zA-Z0-9_]+[[:space:]]+ALIGN\([0-9]+\)[[:space:]]*):[[:space:]]*SUBALIGN\([0-9]+\)/\1:/g' "$LINKFILE"
+  sed -i -E 's/([[:space:]]*\.[a-zA-Z0-9_]+[[:space:]]*:[[:space:]]*\{[^}]*\}[[:space:]]*):[[:space:]]*SUBALIGN\([0-9]+\)/\1:/g' "$LINKFILE"
+  # 兜底：再扫一遍，把单独出现的 SUBALIGN(...) 整段删掉
+  sed -i -E 's/[[:space:]]*SUBALIGN\([0-9]+\)//g' "$LINKFILE"
+  if grep -q "SUBALIGN" "$LINKFILE"; then
+    echo "WARN: linkfile still contains SUBALIGN; restoring original"
+    cp -f "$LINKFILE.orig" "$LINKFILE"
+  else
+    echo "OK: SUBALIGN removed from linkfile."
+  fi
+fi
+
+# ---------------------------------------------------------------------------
+# 6) 重编 bdmfs_fatfs（这是唯一需要 CP936 的模块）
 # ---------------------------------------------------------------------------
 echo "Touching FatFs sources to force rebuild..."
 find "$FATSRC" -maxdepth 4 -name '*.[ch]' -exec touch {} + 2>/dev/null || true

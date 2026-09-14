@@ -4466,7 +4466,7 @@ int getFilePath(char *out, int cnfmode)
 
 				else if ((file_show == 2) && files[top + i].title[0] != 0) {
 					mcTitle = files[top + i].title;
-					name_limit = 43 * 8;  //A9VG汉化版：存档标题也按“文件名+详情”列宽限制
+					name_limit = 44 * 8;  //A9VG汉化版：标题列宽延伸到“详细信息”前，与 R3Z 一致
 				} else {  //Show normal file/folder names
 					// A9VG汉化版：根目录设备名显示为“中文 (英文原名)”
 					if (path[0] == 0)
@@ -4474,7 +4474,7 @@ int getFilePath(char *out, int cnfmode)
 					else
 						strcpy(tmp, files[top + i].name);
 					if (file_show > 0) {  //Does display mode include file details ?
-						name_limit = 43 * 8;
+						name_limit = 44 * 8;
 					} else {  //Filenames are shown without file details
 						name_limit = 71 * 8;
 					}
