@@ -1,38 +1,39 @@
 #!/bin/bash
 #=============================================================================
 # Patch FatFs for Chinese (GBK / CP936) long file names on FAT32 + exFAT
-# (wLaunchELF_ISR 专用版 v4)
+# (wLaunchELF_ISR 专用版 v5)
 #-----------------------------------------------------------------------------
 # ISR 架构关键点：embed.make 从仓库内 iop/__precompiled/bdmfs_fatfs.irx 把文件
 # 系统驱动嵌入 ELF（EXFAT=1 与否用的都是同一个文件）。因此必须把重编产物覆盖到
 # iop/__precompiled/ 才生效，只装到 $PS2SDK/iop/irx 是没用的。
 #
-# v3 -> v4 的关键修正（v3 在 ps2dev/ps2dev:v1.0 镜像里必然失败的原因）：
-#   1) v3 克隆的是 ps2sdk master，其 Defs.make 里
-#      IOP_TOOL_PREFIX ?= mipsel-none-elf-
-#      而 v1.0 镜像里的编译器叫 iop-gcc -> make 报 "Error 127: not found"。
-#      v4 会先探测镜像里实际存在的前缀，再通过命令行变量强制指定。
-#   2) ps2sdk master/2.0.0 链接 IRX 需要 host 工具 srxfixup（要用宿主机 cc 编译），
-#      v1.0 镜像默认没有 gcc。workflow 已加 build-base，脚本里也会检测并传 CC。
-#   3) 新版 ps2sdk 默认 -Werror 和 -gz（压缩调试段），老 GCC 会因此报错，
-#      v4 用命令行变量放宽这两项。
-#   4) ps2sdk 版本锁定到 tag 2.0.0（带 iop/fs/bdmfs_fatfs 的稳定发布版），
-#      不再追 master，避免上游改动再次破坏 CI。
-#   5) 只重编 bdmfs_fatfs；bdm/usbmass_bd/usbd 沿用仓库 iop/__precompiled 里的
-#      原版（它们与 CP936 无关，没必要多失败两个环节）。
+# 版本演进
+#   v3 : 克隆 ps2sdk master + 假定新工具链前缀 -> v1.0 镜像里 Error 127
+#   v4 : 运行时探测工具链前缀（iop- / mipsel-none-elf-），锁定 ps2sdk 2.0.0，
+#        放宽 -Werror / -gz。Error 127 消失，但出现 Error 1：
+#        FatFs r0.16 的 ff.h 在 FF_FS_EXFAT=1 时要求 C99，而 v1.0 镜像的
+#        iop-gcc 是 GCC 3.2.3（不支持 C99）：
+#            #error exFAT feature wants C99 or later
+#            typedef QWORD FSIZE_t;   -> unknown type name 'QWORD'
+#        接着 ff.h 里所有用到 FSIZE_t/FIL* 的声明全部 "syntax error before '*'"
+#   v5 : 1) 自动探测 IOP 编译器是否支持 C99；不支持时才给 ff.h 打补丁
+#           （去掉 #error + 补 typedef unsigned long long QWORD;）
+#        2) 推荐配合 workflow 的 "fatfs" job 在新版镜像 ps2dev/ps2dev:latest
+#           里跑本脚本（GCC 11+ 原生 C99，最稳）；老镜像里跑也能自愈
+#        3) 体积校验阈值按实测收紧：CP869 原版 37724 字节，两张 GBK 码表各约
+#           87KB，CP936 成品应 > 120000 字节
 #
-# 强制校验：CP869 原版约 37KB；CP936（带 GBK 码表）应明显大于 60000 字节，
-# 体积没变大就 exit 1，防止再次静默编出无效版本。
-# 设置 ALLOW_UNPATCHED_FATFS=1 可跳过该校验（不建议）。
+# 设置 ALLOW_UNPATCHED_FATFS=1 可跳过体积校验（不建议）。
 #=============================================================================
 set -u
 
 echo "=========================================="
-echo "FatFs Chinese LFN patch script (ISR edition v4)"
+echo "FatFs Chinese LFN patch script (ISR edition v5)"
 PS2SDK="${PS2SDK:-/usr/local/ps2dev/ps2sdk}"
 WORKSPACE="${GITHUB_WORKSPACE:-$PWD}"
 ALLOW_UNPATCHED_FATFS="${ALLOW_UNPATCHED_FATFS:-0}"
-PS2SDKREF="${PS2SDKREF:-2.0.0}"   # 锁定 ps2sdk 版本
+PS2SDKREF="${PS2SDKREF:-2.0.0}"   # 锁定 ps2sdk 版本，保证可复现
+MIN_CP936_SIZE="${MIN_CP936_SIZE:-120000}"
 export PS2SDK
 echo "Using PS2SDK=$PS2SDK"
 echo "Using WORKSPACE=$WORKSPACE"
@@ -40,7 +41,7 @@ echo "Using PS2SDKREF=$PS2SDKREF"
 echo "=========================================="
 
 # ---------------------------------------------------------------------------
-# 0) 探测工具链前缀（v1.0 老镜像 = iop-，新镜像 = mipsel-none-elf-）
+# 0) 探测工具链前缀（老镜像 = iop-，新镜像 = mipsel-none-elf-）
 # ---------------------------------------------------------------------------
 have() { command -v "$1" >/dev/null 2>&1; }
 
@@ -71,6 +72,13 @@ echo "IOP tool prefix : $IOPP"
 echo "EE  tool prefix : ${EEP:-<未检测到，交由 Defs.make 默认值>}"
 echo "Host  compiler  : $HOSTCC"
 "$IOPP"gcc --version | head -1 || true
+
+# --- 探测编译器是否支持 C99（GCC 3.2.3 的 gnu89 默认不定义 __STDC_VERSION__）---
+C99=no
+if "$IOPP"gcc -dM -E -x c /dev/null 2>/dev/null | grep -qE '#define[[:space:]]+__STDC_VERSION__'; then
+  C99=yes
+fi
+echo "Compiler C99    : $C99"
 echo "=========================================="
 
 # ---------------------------------------------------------------------------
@@ -103,6 +111,8 @@ echo "PS2SDKSRC=$PS2SDKSRC"
 
 # ---------------------------------------------------------------------------
 # 2) 确保 FatFs 外部依赖存在（ps2sdk 2.0.0 官方脚本用的是 fjtrujy/FatFs iop-r0.16）
+#    bdmfs_fatfs 的 Makefile 里 $(FATFS) 只要目录存在就不会去跑 external_deps，
+#    所以这里直接克隆比跑 download_dependencies.sh 更省事也更可控。
 # ---------------------------------------------------------------------------
 FATSRC="$PS2SDKSRC/common/external_deps/fatfs"
 
@@ -153,10 +163,72 @@ if ! grep -hqE "^#define[[:space:]]+FF_CODE_PAGE[[:space:]]+936" $FFCONF_LIST; t
   echo "ERROR: FF_CODE_PAGE was NOT set to 936"
   exit 1
 fi
+if ! grep -hqE "^#define[[:space:]]+FF_FS_EXFAT[[:space:]]+1" $FFCONF_LIST; then
+  echo "ERROR: FF_FS_EXFAT was NOT set to 1"
+  exit 1
+fi
 
 # ---------------------------------------------------------------------------
-# 4) 重编 bdmfs_fatfs（这是唯一需要 CP936 的模块）
-#    关键：用命令行变量覆盖工具前缀，绕开 Error 127
+# 4) pre-C99 兼容补丁（仅 GCC 3.2.x 等老编译器需要）
+#    FatFs r0.16 打开 exFAT 后：
+#        #if FF_FS_EXFAT
+#        #if FF_INTDEF != 2
+#        #error exFAT feature wants C99 or later
+#        #endif
+#        typedef QWORD FSIZE_t;
+#    老 GCC 走 pre-C99 分支（FF_INTDEF=1），QWORD 未定义 -> 上面 #error 触发，
+#    之后凡是 FIL* / FSIZE_t 的声明全部 syntax error before '*'。
+#    解决办法：保留 FF_INTDEF=1，去掉 #error，并补一个 64 位类型。
+# ---------------------------------------------------------------------------
+FFH_LIST="$(find "$FATSRC" -maxdepth 5 -name ff.h 2>/dev/null)"
+echo "Found ff.h:"
+echo "$FFH_LIST"
+
+if [ "$C99" = "no" ]; then
+  echo ">>> Applying pre-C99 (QWORD) compatibility patch to ff.h ..."
+  for FFH in $FFH_LIST; do
+    # 4a) 去掉 exFAT 的 C99 硬报错
+    awk '
+      /^[[:space:]]*#error[[:space:]]+exFAT feature wants C99 or later/ {
+        print "/* A9VG: pre-C99 编译器下允许 exFAT，QWORD 在下面补定义 */"
+        next
+      }
+      { print }
+    ' "$FFH" > "$FFH.a9vg" && mv "$FFH.a9vg" "$FFH"
+
+    # 4b) 在 pre-C99 分支（#define FF_INTDEF 1）后补 QWORD
+    #     注意：C99 分支里也有一行 "typedef WORD WCHAR;"，不能拿它当锚点，
+    #     否则会插到错误的分支里。FF_INTDEF 1 是 pre-C99 分支独有的。
+    awk '
+      BEGIN { done = 0 }
+      /^[[:space:]]*#define[[:space:]]+FF_INTDEF[[:space:]]+1/ && done == 0 {
+        print
+        print "typedef unsigned long long QWORD;\t/* A9VG: 64-bit unsigned for pre-C99 */"
+        done = 1
+        next
+      }
+      { print }
+    ' "$FFH" > "$FFH.a9vg" && mv "$FFH.a9vg" "$FFH"
+
+    echo "--- patched $FFH ---"
+    grep -nE "QWORD|A9VG" "$FFH" | head -10
+  done
+
+  if ! grep -hq "typedef unsigned long long QWORD" $FFH_LIST; then
+    echo "ERROR: failed to inject QWORD typedef into ff.h"
+    exit 1
+  fi
+  if grep -hq "exFAT feature wants C99 or later" $FFH_LIST; then
+    echo "ERROR: ff.h still contains the C99 #error guard"
+    exit 1
+  fi
+  echo "OK: ff.h patched for pre-C99 compiler."
+else
+  echo "Compiler supports C99 -> no ff.h patch needed."
+fi
+
+# ---------------------------------------------------------------------------
+# 5) 重编 bdmfs_fatfs（这是唯一需要 CP936 的模块）
 # ---------------------------------------------------------------------------
 echo "Touching FatFs sources to force rebuild..."
 find "$FATSRC" -maxdepth 4 -name '*.[ch]' -exec touch {} + 2>/dev/null || true
@@ -181,7 +253,7 @@ fi
 echo "built: $FATFS_IRX ($(wc -c < "$FATFS_IRX") bytes)"
 
 # ---------------------------------------------------------------------------
-# 5) ISR 架构关键步骤：覆盖仓库内 iop/__precompiled/bdmfs_fatfs.irx
+# 6) ISR 架构关键步骤：覆盖仓库内 iop/__precompiled/bdmfs_fatfs.irx
 # ---------------------------------------------------------------------------
 PRE="$WORKSPACE/iop/__precompiled"
 mkdir -p "$PRE"
@@ -189,7 +261,7 @@ cp -f "$FATFS_IRX" "$PRE/bdmfs_fatfs.irx" \
   && echo "OK: updated $PRE/bdmfs_fatfs.irx (this is the copy embed.make embeds)"
 
 # ---------------------------------------------------------------------------
-# 6) 强制校验 + 诊断输出
+# 7) 强制校验 + 诊断输出
 # ---------------------------------------------------------------------------
 echo "=========================================="
 ls -la "$PRE/bdmfs_fatfs.irx" 2>&1 || true
@@ -203,9 +275,9 @@ if [ ! -f "$PRE/bdmfs_fatfs.irx" ]; then
 else
   SIZE=$(wc -c < "$PRE/bdmfs_fatfs.irx" | tr -d ' ')
   echo "bdmfs_fatfs.irx size = $SIZE bytes"
-  echo "  (CP869 原版约 37724 字节；CP936 带码表应明显大于 60000 字节)"
-  if [ "$SIZE" -lt 60000 ]; then
-    echo "ERROR: bdmfs_fatfs.irx is still the old CP869 build -> 中文长文件名不会出现，只会显示 8.3 短名(~1)"
+  echo "  (CP869 原版 37724 字节；CP936 含两张 GBK 码表，应 > $MIN_CP936_SIZE 字节)"
+  if [ "$SIZE" -lt "$MIN_CP936_SIZE" ]; then
+    echo "ERROR: bdmfs_fatfs.irx is still the old CP869 build -> 中文长文件名不会出现"
     FATAL=1
   else
     echo "OK: bdmfs_fatfs.irx looks like a CP936 build."
@@ -213,8 +285,8 @@ else
 fi
 
 if [ "$FATAL" -eq 1 ] && [ "$ALLOW_UNPATCHED_FATFS" != "1" ]; then
-  echo "FatFs CP936 patch FAILED. 构建已中止。"
-  echo "（如需无论如何都继续出包，可在 workflow 里给本步设置环境变量 ALLOW_UNPATCHED_FATFS=1）"
+  echo "FatFs CP936 patch FAILED."
+  echo "（如需无论如何都继续出包，可设置环境变量 ALLOW_UNPATCHED_FATFS=1）"
   exit 1
 fi
 
