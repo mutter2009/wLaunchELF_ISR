@@ -12,22 +12,26 @@ on:
         required: false
         default: '1'
 
+env:
+  # GitHub 于 2025-09 弃用 Node20 并默认强制 Node24，而 israpps 官方 CI 所用的
+  # ps2dev/ps2dev:v1.0 老镜像 musl 无法运行 Node24。此开关是 GitHub 官方文档
+  # 提供的临时方案，允许 Node20 的 JS actions 继续运行（israpps 官方即 Node20
+  # 时代配置）。除汉化 patch 步骤外，本 workflow 与 israpps 官方配置一致。
+  ACTIONS_ALLOW_USE_UNSECURE_NODE_VERSION: "true"
+
 jobs:
   build:
     runs-on: ubuntu-latest
-    # 必须用 latest（新 Alpine/musl 支持 Node24 的 JS actions）。
-    # v1.0 老镜像的 musl 缺 pthread_getname_np，Node20/24 的 action 都跑不了
-    # （2025-09 起 GitHub 已弃用 Node20，无法再退回）。
-    # latest 镜像的 $PS2SDK 同样是带 Defs.make 的 ps2sdk 源码树，
-    # 缺少的 FatFs 外部依赖由 patch 脚本直接克隆 fjtrujy/FatFs 解决。
-    container: ps2dev/ps2dev:latest
+    # israpps 官方 CI 原版镜像：预装 ps2sdk-ports（libjpg/gsKit）、ps2-packer，
+    # 且 $PS2SDK 即 ps2sdk 源码树（供 patch 脚本重编 bdmfs_fatfs）
+    container: ps2dev/ps2dev:v1.0
     steps:
       - name: Install dependencies
         run: |
           apk add --no-cache make git zip bash
 
       - name: Checkout
-        uses: actions/checkout@v6
+        uses: actions/checkout@v4
       - name: Configure git
         run: |
           git config --global --add safe.directory "$GITHUB_WORKSPACE"
@@ -43,7 +47,7 @@ jobs:
           make rebuild EXFAT=${{ github.event.inputs.exfat }} MX4SIO=${{ github.event.inputs.mx4sio }}
 
       - name: Upload ELF
-        uses: actions/upload-artifact@v7
+        uses: actions/upload-artifact@v4
         with:
           name: wLaunchELF_ISR-A9VG
           path: BOOT*.ELF
