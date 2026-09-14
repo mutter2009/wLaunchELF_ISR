@@ -15,17 +15,19 @@ on:
 jobs:
   build:
     runs-on: ubuntu-latest
-    # 与 israpps 官方 CI 相同的工具链镜像（$PS2SDK 即源码树，含 IOP 工具链与 ps2-packer）
-    # 注意：该镜像基于较老 Alpine（musl 无 pthread_getname_np），只能跑 node20 的
-    # JS actions —— 因此必须用 checkout@v4，且不能设置 FORCE_JAVASCRIPT_ACTIONS_TO_NODE24
-    container: ps2dev/ps2dev:v1.0
+    # 必须用 latest（新 Alpine/musl 支持 Node24 的 JS actions）。
+    # v1.0 老镜像的 musl 缺 pthread_getname_np，Node20/24 的 action 都跑不了
+    # （2025-09 起 GitHub 已弃用 Node20，无法再退回）。
+    # latest 镜像的 $PS2SDK 同样是带 Defs.make 的 ps2sdk 源码树，
+    # 缺少的 FatFs 外部依赖由 patch 脚本直接克隆 fjtrujy/FatFs 解决。
+    container: ps2dev/ps2dev:latest
     steps:
       - name: Install dependencies
         run: |
           apk add --no-cache make git zip bash
 
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
       - name: Configure git
         run: |
           git config --global --add safe.directory "$GITHUB_WORKSPACE"
@@ -41,7 +43,7 @@ jobs:
           make rebuild EXFAT=${{ github.event.inputs.exfat }} MX4SIO=${{ github.event.inputs.mx4sio }}
 
       - name: Upload ELF
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: wLaunchELF_ISR-A9VG
           path: BOOT*.ELF
