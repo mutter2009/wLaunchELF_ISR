@@ -1,27 +1,20 @@
 #!/bin/bash
 #=============================================================================
 # Patch FatFs for Chinese (GBK / CP936) long file names on FAT32 + exFAT
-# (wLaunchELF_ISR 专用版 v5)
+# (wLaunchELF_ISR 专用版 v6)
 #-----------------------------------------------------------------------------
 # ISR 架构关键点：embed.make 从仓库内 iop/__precompiled/bdmfs_fatfs.irx 把文件
 # 系统驱动嵌入 ELF（EXFAT=1 与否用的都是同一个文件）。因此必须把重编产物覆盖到
 # iop/__precompiled/ 才生效，只装到 $PS2SDK/iop/irx 是没用的。
 #
 # 版本演进
-#   v3 : 克隆 ps2sdk master + 假定新工具链前缀 -> v1.0 镜像里 Error 127
-#   v4 : 运行时探测工具链前缀（iop- / mipsel-none-elf-），锁定 ps2sdk 2.0.0，
-#        放宽 -Werror / -gz。Error 127 消失，但出现 Error 1：
-#        FatFs r0.16 的 ff.h 在 FF_FS_EXFAT=1 时要求 C99，而 v1.0 镜像的
-#        iop-gcc 是 GCC 3.2.3（不支持 C99）：
-#            #error exFAT feature wants C99 or later
-#            typedef QWORD FSIZE_t;   -> unknown type name 'QWORD'
-#        接着 ff.h 里所有用到 FSIZE_t/FIL* 的声明全部 "syntax error before '*'"
-#   v5 : 1) 自动探测 IOP 编译器是否支持 C99；不支持时才给 ff.h 打补丁
-#           （去掉 #error + 补 typedef unsigned long long QWORD;）
-#        2) 推荐配合 workflow 的 "fatfs" job 在新版镜像 ps2dev/ps2dev:latest
-#           里跑本脚本（GCC 11+ 原生 C99，最稳）；老镜像里跑也能自愈
-#        3) 体积校验阈值按实测收紧：CP869 原版 37724 字节，两张 GBK 码表各约
-#           87KB，CP936 成品应 > 120000 字节
+#   v5 : 自动探测 IOP 编译器是否支持 C99；不支持时才给 ff.h 打补丁；
+#        对 IOP linkfile 做 GCC 3.2.3 兼容补丁（_gp 移到 .data 段内）。
+#        但 v1.0 镜像下 linkfile 补丁始终复发 undefined symbol _gp。
+#   v6 : 直接参考 wLaunchELF_R3Z 的成功经验，把 CI 镜像换成
+#        ghcr.io/ps2homebrew/ps2homebrew:main（现代 GCC/binutils，原生 C99）。
+#        该镜像能直接编译 ps2sdk master 的 IOP 模块，linkfile 补丁与 ff.h C99
+#        补丁均不再需要；脚本仅在探测到老工具链（iop-gcc / C99=no）时才回退补丁。
 #
 # 设置 ALLOW_UNPATCHED_FATFS=1 可跳过体积校验（不建议）。
 #=============================================================================
@@ -250,70 +243,69 @@ fi
 MAKE_FLAGS=""
 
 # ---------------------------------------------------------------------------
-# 5) GCC 3.2.3 兼容补丁：ps2sdk master 的 IOP linkfile 用了 SUBALIGN(16)，
-#    老 ld 不认识，链接时报 "parse error"；PROVIDE(_gp = ALIGN(...) + 0x7ff0)
-#    里的 ALIGN 表达式老 ld 也算不了，会报 "undefined symbol `_gp'".
-#
-# 策略：不依赖安装版 linkfile（容器镜像里的版本也可能带同样的表达式），而是
-# 直接修改从 ps2sdk master 克隆出来的 linkfile：
-#   1) 去掉所有 SUBALIGN(...)
-#   2) 把段外的 PROVIDE(_gp = ...) 删除
-#   3) 在 .data 段内部、PROVIDE(_fdata = .) 之后插入 PROVIDE(_gp = . + 0x7ff0)
-#      这样在 section 内用 location counter (.) 计算，老 ld 完全可以解析。
+# 5) GCC 3.2.3 兼容补丁（仅老工具链需要）
+#    ps2sdk master 的 IOP linkfile 用了 SUBALIGN(16)，老 ld 不认识，链接时报
+#    "parse error"；PROVIDE(_gp = ALIGN(...) + 0x7ff0) 里的 ALIGN 表达式老 ld
+#    也算不了，会报 "undefined symbol `_gp'".
+#    新工具链（ps2homebrew:main 等）能直接解析 master linkfile，无需此补丁。
 # ---------------------------------------------------------------------------
 LINKFILE="$PS2SDKSRC/iop/startup/src/linkfile"
 FIXED_LINKFILE="$PS2SDKSRC/iop/startup/src/linkfile.a9vg"
 if [ -f "$LINKFILE" ]; then
-  echo ">>> Preparing IOP linkfile for old binutils ..."
-  cp -f "$LINKFILE" "$LINKFILE.orig"
-  cp -f "$LINKFILE" "$FIXED_LINKFILE"
-
-  echo "Original _gp line:"
-  grep -n 'PROVIDE(_gp' "$FIXED_LINKFILE" || true
-
-  awk '
-    {
-      # 去掉 SUBALIGN(...)
-      gsub(/[[:space:]]*SUBALIGN\([0-9]+\)/, "");
-
-      # 跳过段外的旧 _gp PROVIDE 行
-      if ($0 ~ /PROVIDE\(_gp = [^;]*;/) {
-        next;
-      }
-
-      print;
-
-      # 在 _fdata 定义后插入 _gp 定义（在 .data 段内部，用 location counter）
-      if ($0 ~ /PROVIDE\(_fdata = \.\);/) {
-        match($0, /^[[:space:]]*/);
-        indent = substr($0, 1, RLENGTH);
-        print indent "PROVIDE(_gp = . + 0x7ff0);";
-      }
-    }
-  ' "$FIXED_LINKFILE" > "$FIXED_LINKFILE.tmp" && mv -f "$FIXED_LINKFILE.tmp" "$FIXED_LINKFILE"
-
-  if grep -q "SUBALIGN" "$FIXED_LINKFILE"; then
-    echo "WARN: linkfile still contains SUBALIGN"
+  if [ "$C99" = "yes" ]; then
+    echo ">>> Modern toolchain detected -> skipping IOP linkfile patch."
   else
-    echo "OK: SUBALIGN removed from linkfile."
+    echo ">>> Preparing IOP linkfile for old binutils ..."
+    cp -f "$LINKFILE" "$LINKFILE.orig"
+    cp -f "$LINKFILE" "$FIXED_LINKFILE"
+
+    echo "Original _gp line:"
+    grep -n 'PROVIDE(_gp' "$FIXED_LINKFILE" || true
+
+    awk '
+      {
+        # 去掉 SUBALIGN(...)
+        gsub(/[[:space:]]*SUBALIGN\([0-9]+\)/, "");
+
+        # 跳过段外的旧 _gp PROVIDE 行
+        if ($0 ~ /PROVIDE\(_gp = [^;]*;/) {
+          next;
+        }
+
+        print;
+
+        # 在 _fdata 定义后插入 _gp 定义（在 .data 段内部，用 location counter）
+        if ($0 ~ /PROVIDE\(_fdata = \.\);/) {
+          match($0, /^[[:space:]]*/);
+          indent = substr($0, 1, RLENGTH);
+          print indent "PROVIDE(_gp = . + 0x7ff0);";
+        }
+      }
+    ' "$FIXED_LINKFILE" > "$FIXED_LINKFILE.tmp" && mv -f "$FIXED_LINKFILE.tmp" "$FIXED_LINKFILE"
+
+    if grep -q "SUBALIGN" "$FIXED_LINKFILE"; then
+      echo "WARN: linkfile still contains SUBALIGN"
+    else
+      echo "OK: SUBALIGN removed from linkfile."
+    fi
+
+    echo "New _gp line(s):"
+    grep -n 'PROVIDE(_gp' "$FIXED_LINKFILE" || true
+
+    if ! grep -qE 'PROVIDE\(_gp = \. \+ 0x7ff0\)' "$FIXED_LINKFILE"; then
+      echo "ERROR: _gp was not patched into .data section; linkfile may have changed upstream"
+      exit 1
+    fi
+    echo "OK: _gp now uses ". + 0x7ff0" inside .data section."
+
+    # 同时把原 linkfile 也改掉，保持源码树一致
+    cp -f "$FIXED_LINKFILE" "$LINKFILE"
+
+    # 强制 make 使用修复后的副本
+    export IOP_LINKFILE="$FIXED_LINKFILE"
+    MAKE_FLAGS="$MAKE_FLAGS IOP_LINKFILE=$FIXED_LINKFILE"
+    echo "IOP_LINKFILE=$IOP_LINKFILE"
   fi
-
-  echo "New _gp line(s):"
-  grep -n 'PROVIDE(_gp' "$FIXED_LINKFILE" || true
-
-  if ! grep -qE 'PROVIDE\(_gp = \. \+ 0x7ff0\)' "$FIXED_LINKFILE"; then
-    echo "ERROR: _gp was not patched into .data section; linkfile may have changed upstream"
-    exit 1
-  fi
-  echo "OK: _gp now uses ". + 0x7ff0" inside .data section."
-
-  # 同时把原 linkfile 也改掉，保持源码树一致
-  cp -f "$FIXED_LINKFILE" "$LINKFILE"
-
-  # 强制 make 使用修复后的副本
-  export IOP_LINKFILE="$FIXED_LINKFILE"
-  MAKE_FLAGS="$MAKE_FLAGS IOP_LINKFILE=$FIXED_LINKFILE"
-  echo "IOP_LINKFILE=$IOP_LINKFILE"
 fi
 
 # ---------------------------------------------------------------------------
