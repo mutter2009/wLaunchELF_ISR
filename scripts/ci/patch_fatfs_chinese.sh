@@ -1,7 +1,7 @@
 #!/bin/bash
 #=============================================================================
 # Patch FatFs for Chinese (GBK / CP936) long file names on FAT32 + exFAT
-# (wLaunchELF_ISR 专用版 v6)
+# (wLaunchELF_ISR 专用版 v7)
 #-----------------------------------------------------------------------------
 # ISR 架构关键点：embed.make 从仓库内 iop/__precompiled/bdmfs_fatfs.irx 把文件
 # 系统驱动嵌入 ELF（EXFAT=1 与否用的都是同一个文件）。因此必须把重编产物覆盖到
@@ -10,18 +10,22 @@
 # 版本演进
 #   v5 : 自动探测 IOP 编译器是否支持 C99；不支持时才给 ff.h 打补丁；
 #        对 IOP linkfile 做 GCC 3.2.3 兼容补丁（_gp 移到 .data 段内）。
-#        但 v1.0 镜像下 linkfile 补丁始终复发 undefined symbol _gp。
-#   v6 : 直接参考 wLaunchELF_R3Z 的成功经验，把 CI 镜像换成
-#        ghcr.io/ps2homebrew/ps2homebrew:main（现代 GCC/binutils，原生 C99）。
-#        该镜像能直接编译 ps2sdk master 的 IOP 模块，linkfile 补丁与 ff.h C99
-#        补丁均不再需要；脚本仅在探测到老工具链（iop-gcc / C99=no）时才回退补丁。
+#        但 v1.0 镜像下 make 用的还是 master clone 的 linkfile，_gp 错误反复出现。
+#   v6 : 换成 ghcr.io/ps2homebrew/ps2homebrew:main 镜像，结果 EE 阶段缺少旧版
+#        libjpg，israpps 代码依赖 jpgOpenRAW 等旧 API，新镜像里没有。
+#   v7 : 回到 ps2dev/ps2dev:v1.0 镜像，但重编 bdmfs_fatfs 时显式使用镜像自带的
+#        IOP linkfile（$PS2SDK/iop/startup/src/linkfile），而不是 master clone 里
+#        不兼容老 ld 的 linkfile。这样同时保留：
+#          - 旧版 libjpg 头文件/库可用
+#          - FatFs 源码可重编并替换
+#          - 绕过 master linkfile 的 _gp / SUBALIGN 问题
 #
 # 设置 ALLOW_UNPATCHED_FATFS=1 可跳过体积校验（不建议）。
 #=============================================================================
 set -u
 
 echo "=========================================="
-echo "FatFs Chinese LFN patch script (ISR edition v5)"
+echo "FatFs Chinese LFN patch script (ISR edition v7)"
 PS2SDK="${PS2SDK:-/usr/local/ps2dev/ps2sdk}"
 WORKSPACE="${GITHUB_WORKSPACE:-$PWD}"
 ALLOW_UNPATCHED_FATFS="${ALLOW_UNPATCHED_FATFS:-0}"
@@ -243,69 +247,33 @@ fi
 MAKE_FLAGS=""
 
 # ---------------------------------------------------------------------------
-# 5) GCC 3.2.3 兼容补丁（仅老工具链需要）
-#    ps2sdk master 的 IOP linkfile 用了 SUBALIGN(16)，老 ld 不认识，链接时报
-#    "parse error"；PROVIDE(_gp = ALIGN(...) + 0x7ff0) 里的 ALIGN 表达式老 ld
-#    也算不了，会报 "undefined symbol `_gp'".
-#    新工具链（ps2homebrew:main 等）能直接解析 master linkfile，无需此补丁。
+# 5) IOP linkfile 选择（关键：老工具链要避开 master clone 里的 linkfile）
+#
+#    ps2sdk master 的 IOP linkfile 用了 SUBALIGN(16) 和
+#    PROVIDE(_gp = ALIGN(16) + 0x7ff0)。GCC 3.2.3 / binutils 2.14 的老 ld
+#    无法解析，会报 "parse error" 或 "undefined symbol `_gp'".
+#
+#    而 ps2dev/ps2dev:v1.0 镜像自带的 ps2sdk 安装版 linkfile
+#    ($PS2SDK/iop/startup/src/linkfile) 和老工具链是配套的，能正常链接。
+#    israpps 官方 CI 直接用 make rebuild 成功就是证据。
+#
+#    因此策略：重编 bdmfs_fatfs 时，强制 IOP_LINKFILE 指向安装版 linkfile，
+#    完全绕过 master clone 里不兼容的 linkfile。
 # ---------------------------------------------------------------------------
-LINKFILE="$PS2SDKSRC/iop/startup/src/linkfile"
-FIXED_LINKFILE="$PS2SDKSRC/iop/startup/src/linkfile.a9vg"
-if [ -f "$LINKFILE" ]; then
-  if [ "$C99" = "yes" ]; then
-    echo ">>> Modern toolchain detected -> skipping IOP linkfile patch."
-  else
-    echo ">>> Preparing IOP linkfile for old binutils ..."
-    cp -f "$LINKFILE" "$LINKFILE.orig"
-    cp -f "$LINKFILE" "$FIXED_LINKFILE"
+INSTALLED_LINKFILE="$PS2SDK/iop/startup/src/linkfile"
+if [ ! -f "$INSTALLED_LINKFILE" ]; then
+  # 如果标准位置没有，尝试在 $PS2SDK 下任意位置找一个 linkfile
+  INSTALLED_LINKFILE="$(find "$PS2SDK" -maxdepth 5 -name 'linkfile' -type f 2>/dev/null | head -1)"
+fi
 
-    echo "Original _gp line:"
-    grep -n 'PROVIDE(_gp' "$FIXED_LINKFILE" || true
-
-    awk '
-      {
-        # 去掉 SUBALIGN(...)
-        gsub(/[[:space:]]*SUBALIGN\([0-9]+\)/, "");
-
-        # 跳过段外的旧 _gp PROVIDE 行
-        if ($0 ~ /PROVIDE\(_gp = [^;]*;/) {
-          next;
-        }
-
-        print;
-
-        # 在 _fdata 定义后插入 _gp 定义（在 .data 段内部，用 location counter）
-        if ($0 ~ /PROVIDE\(_fdata = \.\);/) {
-          match($0, /^[[:space:]]*/);
-          indent = substr($0, 1, RLENGTH);
-          print indent "PROVIDE(_gp = . + 0x7ff0);";
-        }
-      }
-    ' "$FIXED_LINKFILE" > "$FIXED_LINKFILE.tmp" && mv -f "$FIXED_LINKFILE.tmp" "$FIXED_LINKFILE"
-
-    if grep -q "SUBALIGN" "$FIXED_LINKFILE"; then
-      echo "WARN: linkfile still contains SUBALIGN"
-    else
-      echo "OK: SUBALIGN removed from linkfile."
-    fi
-
-    echo "New _gp line(s):"
-    grep -n 'PROVIDE(_gp' "$FIXED_LINKFILE" || true
-
-    if ! grep -qE 'PROVIDE\(_gp = \. \+ 0x7ff0\)' "$FIXED_LINKFILE"; then
-      echo "ERROR: _gp was not patched into .data section; linkfile may have changed upstream"
-      exit 1
-    fi
-    echo "OK: _gp now uses ". + 0x7ff0" inside .data section."
-
-    # 同时把原 linkfile 也改掉，保持源码树一致
-    cp -f "$FIXED_LINKFILE" "$LINKFILE"
-
-    # 强制 make 使用修复后的副本
-    export IOP_LINKFILE="$FIXED_LINKFILE"
-    MAKE_FLAGS="$MAKE_FLAGS IOP_LINKFILE=$FIXED_LINKFILE"
-    echo "IOP_LINKFILE=$IOP_LINKFILE"
-  fi
+if [ -f "$INSTALLED_LINKFILE" ]; then
+  echo ">>> Using installed ps2sdk IOP linkfile: $INSTALLED_LINKFILE"
+  MAKE_FLAGS="$MAKE_FLAGS IOP_LINKFILE=$INSTALLED_LINKFILE"
+  echo "    (avoids master linkfile _gp/SUBALIGN issues on old binutils)"
+else
+  echo "WARN: cannot find installed IOP linkfile under $PS2SDK"
+  echo "      Will rely on default IOP_LINKFILE in master clone."
+  echo "      If build fails with _gp/SUBALIGN error, the image layout has changed."
 fi
 
 # ---------------------------------------------------------------------------
