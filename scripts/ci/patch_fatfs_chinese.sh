@@ -254,47 +254,61 @@ MAKE_FLAGS=""
 #    老 ld 不认识，链接时报 "parse error"；PROVIDE(_gp = ALIGN(...) + 0x7ff0)
 #    里的 ALIGN 表达式老 ld 也算不了，会报 "undefined symbol `_gp'".
 #
-# 策略：不用 master 的 linkfile，直接用容器里已安装的 ps2sdk linkfile。该
-# linkfile 和当前 GCC 3.2.3 / binutils 2.14 是配套的，已被官方 wLaunchELF
-# 主构建验证过。把它覆盖到克隆出来的源码树即可。
+# 策略：不依赖安装版 linkfile（容器镜像里的版本也可能带同样的表达式），而是
+# 直接修改从 ps2sdk master 克隆出来的 linkfile：
+#   1) 去掉所有 SUBALIGN(...)
+#   2) 把段外的 PROVIDE(_gp = ...) 删除
+#   3) 在 .data 段内部、PROVIDE(_fdata = .) 之后插入 PROVIDE(_gp = . + 0x7ff0)
+#      这样在 section 内用 location counter (.) 计算，老 ld 完全可以解析。
 # ---------------------------------------------------------------------------
 LINKFILE="$PS2SDKSRC/iop/startup/src/linkfile"
-INSTALLED_LINKFILE="$PS2SDK/iop/startup/src/linkfile"
 FIXED_LINKFILE="$PS2SDKSRC/iop/startup/src/linkfile.a9vg"
 if [ -f "$LINKFILE" ]; then
   echo ">>> Preparing IOP linkfile for old binutils ..."
   cp -f "$LINKFILE" "$LINKFILE.orig"
+  cp -f "$LINKFILE" "$FIXED_LINKFILE"
 
-  if [ -f "$INSTALLED_LINKFILE" ]; then
-    echo "Using installed ps2sdk linkfile: $INSTALLED_LINKFILE"
-    cp -f "$INSTALLED_LINKFILE" "$LINKFILE"
-    cp -f "$INSTALLED_LINKFILE" "$FIXED_LINKFILE"
+  echo "Original _gp line:"
+  grep -n 'PROVIDE(_gp' "$FIXED_LINKFILE" || true
+
+  awk '
+    {
+      # 去掉 SUBALIGN(...)
+      gsub(/[[:space:]]*SUBALIGN\([0-9]+\)/, "");
+
+      # 跳过段外的旧 _gp PROVIDE 行
+      if ($0 ~ /PROVIDE\(_gp = [^;]*;/) {
+        next;
+      }
+
+      print;
+
+      # 在 _fdata 定义后插入 _gp 定义（在 .data 段内部，用 location counter）
+      if ($0 ~ /PROVIDE\(_fdata = \.\);/) {
+        match($0, /^[[:space:]]*/);
+        indent = substr($0, 1, RLENGTH);
+        print indent "PROVIDE(_gp = . + 0x7ff0);";
+      }
+    }
+  ' "$FIXED_LINKFILE" > "$FIXED_LINKFILE.tmp" && mv -f "$FIXED_LINKFILE.tmp" "$FIXED_LINKFILE"
+
+  if grep -q "SUBALIGN" "$FIXED_LINKFILE"; then
+    echo "WARN: linkfile still contains SUBALIGN"
   else
-    echo "WARN: installed linkfile not found at $INSTALLED_LINKFILE; falling back to patching master"
-    cp -f "$LINKFILE" "$FIXED_LINKFILE"
-    # 去掉 SUBALIGN(...)
-    sed -i -E 's/([[:space:]]*\.[a-zA-Z0-9_]+[[:space:]]+ALIGN\([0-9]+\)[[:space:]]*):[[:space:]]*SUBALIGN\([0-9]+\)/\1:/g' "$FIXED_LINKFILE"
-    sed -i -E 's/([[:space:]]*\.[a-zA-Z0-9_]+[[:space:]]*:[[:space:]]*\{[^}]*\}[[:space:]]*):[[:space:]]*SUBALIGN\([0-9]+\)/\1:/g' "$FIXED_LINKFILE"
-    sed -i -E 's/[[:space:]]*SUBALIGN\([0-9]+\)//g' "$FIXED_LINKFILE"
-    if grep -q "SUBALIGN" "$FIXED_LINKFILE"; then
-      echo "WARN: linkfile still contains SUBALIGN"
-    else
-      echo "OK: SUBALIGN removed from linkfile."
-    fi
-    # 把 PROVIDE(_gp = ...) 改成 PROVIDE(_gp = _fdata + 0x7ff0);
-    sed -i -E 's/PROVIDE[[:space:]]*\(_gp[[:space:]]*=[^;]*;/PROVIDE(_gp = _fdata + 0x7ff0);/' "$FIXED_LINKFILE"
-    if grep -qE 'PROVIDE[[:space:]]*\(_gp[[:space:]]*=[[:space:]]*_fdata[[:space:]]*\+[[:space:]]*0x7ff0\)' "$FIXED_LINKFILE"; then
-      echo "OK: _gp now uses _fdata + 0x7ff0."
-    else
-      echo "ERROR: _gp patch failed; linkfile may have changed upstream"
-      exit 1
-    fi
-    # 同时把原 linkfile 也改掉
-    cp -f "$FIXED_LINKFILE" "$LINKFILE"
+    echo "OK: SUBALIGN removed from linkfile."
   fi
 
-  echo "Final _gp line:"
+  echo "New _gp line(s):"
   grep -n 'PROVIDE(_gp' "$FIXED_LINKFILE" || true
+
+  if ! grep -qE 'PROVIDE\(_gp = \. \+ 0x7ff0\)' "$FIXED_LINKFILE"; then
+    echo "ERROR: _gp was not patched into .data section; linkfile may have changed upstream"
+    exit 1
+  fi
+  echo "OK: _gp now uses ". + 0x7ff0" inside .data section."
+
+  # 同时把原 linkfile 也改掉，保持源码树一致
+  cp -f "$FIXED_LINKFILE" "$LINKFILE"
 
   # 强制 make 使用修复后的副本
   export IOP_LINKFILE="$FIXED_LINKFILE"
