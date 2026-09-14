@@ -28,7 +28,7 @@ else
   EE_BIN = UNC-BOOT.ELF
   EE_BIN_PKD = BOOT.ELF
 endif
-EE_OBJS = main.o config.o elf.o draw.o draw_text.o font_cn.o font_elisa.o bg_jpg.o loader_elf.o filer.o \
+EE_OBJS = main.o config.o elf.o draw.o draw_text.o font_cn.o font_elisa.o loader_elf.o filer.o \
 	poweroff_irx.o iomanx_irx.o filexio_irx.o ps2atad_irx.o ps2dev9_irx.o \
 	ps2hdd_irx.o ps2fs_irx.o usbd_irx.o mcman_irx.o mcserv_irx.o \
 	cdvd_irx.o vmc_fs_irx.o ps2kbd_irx.o \
@@ -41,6 +41,16 @@ EE_LDFLAGS := -L$(PS2DEV)/gsKit/lib -L$(PS2SDK)/ports/lib -Liop/oldlibs/libcdvd/
 EE_LIBS = -lgskit -ldmakit -ljpeg -lmc -lhdd -lkbd -lmf \
 	-lcdvd -lc -lfileXio -lpatches -lpoweroff -ldebug
 EE_CFLAGS := -mgpopt -G10240 -G0 -DNEWLIB_PORT_AWARE -D_EE
+
+# A9VG汉化版：是否内置默认背景图（src/bg_raw.c，640x448 RGB888）
+#   BG=1（默认）-> 启动时自动显示内置背景；
+#   BG=0        -> 完全不编入这块数据，行为与 israpps 原版一致（排障时用）。
+#   注意：必须放在上面 EE_CFLAGS := 之后，否则会被简单赋值覆盖掉。
+BG ?= 1
+ifeq ($(BG),1)
+    EE_OBJS += bg_raw.o
+    EE_CFLAGS += -DA9VG_BG_BUILTIN=1
+endif
 
 BIN2S = @bin2s
 

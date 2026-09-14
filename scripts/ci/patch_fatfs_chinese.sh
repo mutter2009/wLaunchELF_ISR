@@ -33,11 +33,24 @@ PS2SDK="${PS2SDK:-/usr/local/ps2dev/ps2sdk}"
 WORKSPACE="${GITHUB_WORKSPACE:-$PWD}"
 ALLOW_UNPATCHED_FATFS="${ALLOW_UNPATCHED_FATFS:-0}"
 PS2SDKREF="${PS2SDKREF:-2.0.0}"   # 锁定 ps2sdk 版本，保证可复现
-MIN_CP936_SIZE="${MIN_CP936_SIZE:-120000}"
+# FATFS_MODE:
+#   936  -> FF_CODE_PAGE=936 + FF_LFN_UNICODE=0，驱动直接吐 GBK 字节（简体中文原生方案）
+#           代价：ffunicode.c 会编进两张 GBK 码表（各约 87KB），IRX 从 37KB 涨到约 210KB，
+#           占 IOP 内存较多。若实机黑屏/起不来，优先怀疑这里。
+#   utf8 -> FF_CODE_PAGE=437 + FF_LFN_UNICODE=2，驱动直接吐 UTF-8 字节
+#           437 码表只有 270 字节，IRX 基本维持原大小（约 40KB），对 IOP 最友好；
+#           汉化版 draw_text.c 的 decode_any() 本来就优先按 UTF-8 解码。
+FATFS_MODE="${FATFS_MODE:-936}"
+case "$FATFS_MODE" in
+  936)  CODE_PAGE=936; LFN_UNICODE=0; MIN_SIZE="${MIN_SIZE:-120000}" ;;
+  utf8) CODE_PAGE=437; LFN_UNICODE=2; MIN_SIZE="${MIN_SIZE:-20000}" ;;
+  *)    echo "ERROR: unknown FATFS_MODE=$FATFS_MODE (use 936 or utf8)" >&2; exit 1 ;;
+esac
 export PS2SDK
 echo "Using PS2SDK=$PS2SDK"
 echo "Using WORKSPACE=$WORKSPACE"
 echo "Using PS2SDKREF=$PS2SDKREF"
+echo "Using FATFS_MODE=$FATFS_MODE (FF_CODE_PAGE=$CODE_PAGE, FF_LFN_UNICODE=$LFN_UNICODE)"
 echo "=========================================="
 
 # ---------------------------------------------------------------------------
@@ -144,27 +157,31 @@ echo "Found ffconf.h:"
 echo "$FFCONF_LIST"
 
 # ---------------------------------------------------------------------------
-# 3) 只改宏数值：CP936 / LFN=2 / exFAT=1 / LFN_UNICODE=0
+# 3) 只改宏数值：码表 / LFN=2 / exFAT=1 / LFN_UNICODE
 # ---------------------------------------------------------------------------
 for FFCONF in $FFCONF_LIST; do
   echo "--- Before patch ($FFCONF) ---"
   grep -nE "^#define[[:space:]]+(FF_CODE_PAGE|FF_USE_LFN|FF_FS_EXFAT|FF_LFN_UNICODE)" "$FFCONF" || true
   sed -i \
-    -e 's/^#define[[:space:]][[:space:]]*FF_CODE_PAGE[[:space:]][[:space:]]*[0-9].*/#define FF_CODE_PAGE\t936/' \
+    -e "s/^#define[[:space:]][[:space:]]*FF_CODE_PAGE[[:space:]][[:space:]]*[0-9].*/#define FF_CODE_PAGE\t$CODE_PAGE/" \
     -e 's/^#define[[:space:]][[:space:]]*FF_USE_LFN[[:space:]][[:space:]]*[0-9].*/#define FF_USE_LFN\t\t2/' \
     -e 's/^#define[[:space:]][[:space:]]*FF_FS_EXFAT[[:space:]][[:space:]]*[0-9].*/#define FF_FS_EXFAT\t1/' \
-    -e 's/^#define[[:space:]][[:space:]]*FF_LFN_UNICODE[[:space:]][[:space:]]*[0-9].*/#define FF_LFN_UNICODE\t0/' \
+    -e "s/^#define[[:space:]][[:space:]]*FF_LFN_UNICODE[[:space:]][[:space:]]*[0-9].*/#define FF_LFN_UNICODE\t$LFN_UNICODE/" \
     "$FFCONF"
   echo "--- After patch ---"
   grep -nE "^#define[[:space:]]+(FF_CODE_PAGE|FF_USE_LFN|FF_FS_EXFAT|FF_LFN_UNICODE)" "$FFCONF" || true
 done
 
-if ! grep -hqE "^#define[[:space:]]+FF_CODE_PAGE[[:space:]]+936" $FFCONF_LIST; then
-  echo "ERROR: FF_CODE_PAGE was NOT set to 936"
+if ! grep -hqE "^#define[[:space:]]+FF_CODE_PAGE[[:space:]]+$CODE_PAGE" $FFCONF_LIST; then
+  echo "ERROR: FF_CODE_PAGE was NOT set to $CODE_PAGE"
   exit 1
 fi
 if ! grep -hqE "^#define[[:space:]]+FF_FS_EXFAT[[:space:]]+1" $FFCONF_LIST; then
   echo "ERROR: FF_FS_EXFAT was NOT set to 1"
+  exit 1
+fi
+if ! grep -hqE "^#define[[:space:]]+FF_LFN_UNICODE[[:space:]]+$LFN_UNICODE" $FFCONF_LIST; then
+  echo "ERROR: FF_LFN_UNICODE was NOT set to $LFN_UNICODE"
   exit 1
 fi
 
@@ -257,8 +274,10 @@ echo "built: $FATFS_IRX ($(wc -c < "$FATFS_IRX") bytes)"
 # ---------------------------------------------------------------------------
 PRE="$WORKSPACE/iop/__precompiled"
 mkdir -p "$PRE"
+rm -f "$PRE/.a9vg_fatfs_ok"     # 清掉上次可能残留的成功标记
 cp -f "$FATFS_IRX" "$PRE/bdmfs_fatfs.irx" \
   && echo "OK: updated $PRE/bdmfs_fatfs.irx (this is the copy embed.make embeds)"
+touch "$PRE/.a9vg_fatfs_ok"     # 给 workflow 的 Verify 步骤当"确实换过驱动"的凭据
 
 # ---------------------------------------------------------------------------
 # 7) 强制校验 + 诊断输出
@@ -275,9 +294,9 @@ if [ ! -f "$PRE/bdmfs_fatfs.irx" ]; then
 else
   SIZE=$(wc -c < "$PRE/bdmfs_fatfs.irx" | tr -d ' ')
   echo "bdmfs_fatfs.irx size = $SIZE bytes"
-  echo "  (CP869 原版 37724 字节；CP936 含两张 GBK 码表，应 > $MIN_CP936_SIZE 字节)"
-  if [ "$SIZE" -lt "$MIN_CP936_SIZE" ]; then
-    echo "ERROR: bdmfs_fatfs.irx is still the old CP869 build -> 中文长文件名不会出现"
+  echo "  (原版 CP869 为 37724 字节；FATFS_MODE=$FATFS_MODE 期望 >= $MIN_SIZE 字节)"
+  if [ "$SIZE" -lt "$MIN_SIZE" ]; then
+    echo "ERROR: bdmfs_fatfs.irx size is below expectation -> 认为构建不对"
     FATAL=1
   else
     echo "OK: bdmfs_fatfs.irx looks like a CP936 build."

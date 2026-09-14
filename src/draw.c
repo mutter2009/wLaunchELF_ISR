@@ -22,12 +22,16 @@ extern unsigned int decode_any(const unsigned char *s, int *nbytes);
 extern int cn_glyph_width;   // font_cn.c 提供（16，CJK 字模宽度）
 
 //--------------------------------------------------------------
-// A9VG汉化版：内置默认背景图（src/bg_jpg.c，640x480 JPEG）
+// A9VG汉化版：内置默认背景图（src/bg_raw.c，预先解码好的 640x448 RGB888）
 //   LAUNCHELF.CNF 未指定 skin / GUI_skin 时自动使用，实现“默认开启背景”。
 //   若在配置里另外选择了 JPG，则以用户选择为准。
+//   BG=0 编译时整段不参与编译，行为与 israpps 原版完全一致（排障用）。
 //--------------------------------------------------------------
-extern const unsigned char bg_jpg_builtin[];
-extern const unsigned int bg_jpg_builtin_size;
+#ifdef A9VG_BG_BUILTIN
+extern const unsigned char bg_raw_builtin[];
+extern const unsigned int bg_raw_width;
+extern const unsigned int bg_raw_height;
+#endif
 
 char LastMessage[MAX_TEXT_LINE + 2];
 
@@ -703,6 +707,7 @@ void updateScreenMode(void)
 //--------------------------------------------------------------
 // A9VG汉化版：大小写无关字符串比较（避免依赖 strings.h）
 //--------------------------------------------------------------
+#ifdef A9VG_BG_BUILTIN
 static int strEqCI(const char *a, const char *b)
 {
 	while (*a && *b) {
@@ -718,43 +723,33 @@ static int strEqCI(const char *a, const char *b)
 	}
 	return *a == *b;
 }
+#endif /* A9VG_BG_BUILTIN */
 //--------------------------------------------------------------
 // A9VG汉化版：加载内置默认背景图（与 BACKGROUND_PIC 走同一套缩放/上传流程）
+//   BG=0 时不编译
 //--------------------------------------------------------------
+#ifdef A9VG_BG_BUILTIN
 static void loadBuiltinSkin(void)
 {
-	jpgData *Jpg;
-	u8 *ImgData;
-
-	if (bg_jpg_builtin_size == 0)
-		return;
-
-	Jpg = jpgOpenRAW((u8 *)bg_jpg_builtin, (int)bg_jpg_builtin_size, JPG_WIDTH_FIX);
-	if (Jpg == NULL)
-		return;
-
-	if ((ImgData = memalign(64, Jpg->width * Jpg->height * (Jpg->bpp / 8))) > 0) {
-		if ((jpgReadImage(Jpg, ImgData)) != -1) {
-			if ((ScaleBitmap(ImgData, Jpg->width, Jpg->height, (void *)&TexSkin.Mem, SCREEN_WIDTH, SCREEN_HEIGHT)) != 0) {
-				TexSkin.PSM = GS_PSM_CT24;
-				TexSkin.VramClut = 0;
-				TexSkin.Clut = NULL;
-				TexSkin.Width = SCREEN_WIDTH;
-				TexSkin.Height = SCREEN_HEIGHT;
-				TexSkin.Filter = GS_FILTER_NEAREST;
-				gsGlobal->CurrentPointer = 0x140000;
-				TexSkin.Vram = gsKit_vram_alloc(gsGlobal,
-				                                gsKit_texture_size(TexSkin.Width, TexSkin.Height, TexSkin.PSM),
-				                                GSKIT_ALLOC_USERBUFFER);
-				gsKit_texture_upload(gsGlobal, &TexSkin);
-				free(TexSkin.Mem);
-				testskin = 1;
-			} /* end if */
-		}     /* end if((jpgReadImage(...)) != -1) */
-		free(ImgData);
-	} /* end if( (ImgData = memalign(...)) > 0 ) */
-	jpgClose(Jpg);
+	// 背景已预先解码成 640x448 RGB888（src/bg_raw.c），这里直接当纹理上传，
+	// 不走 libjpg、不 malloc、不需要 ScaleBitmap —— 全程无失败点。
+	// 显示时 clrScr() 会把它拉伸到 SCREEN_WIDTH x SCREEN_HEIGHT，
+	// 所以 PAL（512 行）下也会被拉满，只是纵向比例略有变化。
+	TexSkin.Mem = (void *)bg_raw_builtin;
+	TexSkin.Width = (int)bg_raw_width;
+	TexSkin.Height = (int)bg_raw_height;
+	TexSkin.PSM = GS_PSM_CT24;
+	TexSkin.VramClut = 0;
+	TexSkin.Clut = NULL;
+	TexSkin.Filter = GS_FILTER_NEAREST;
+	gsGlobal->CurrentPointer = 0x140000;
+	TexSkin.Vram = gsKit_vram_alloc(gsGlobal,
+	                                gsKit_texture_size(TexSkin.Width, TexSkin.Height, TexSkin.PSM),
+	                                GSKIT_ALLOC_USERBUFFER);
+	gsKit_texture_upload(gsGlobal, &TexSkin);
+	testskin = 1;
 }
+#endif /* A9VG_BG_BUILTIN */
 //--------------------------------------------------------------
 void loadSkin(int Picture, char *Path, int ThumbNum)
 {
@@ -789,10 +784,13 @@ void loadSkin(int Picture, char *Path, int ThumbNum)
 
 	// A9VG汉化版：未指定（或找不到）背景图时改用内置背景图，实现“默认开启背景”。
 	//   在系统配置里把 skin 设为 none / off 可彻底关闭背景。
+	//   注意这里不能 return —— 函数尾部还有 cdfs:/hdd0: 的收尾清理，跳过会出副作用。
+	//   File 本来就是 NULL，下面的 if(File != NULL) 自然不会进入。
 	if (Picture == BACKGROUND_PIC && File == NULL) {
+#ifdef A9VG_BG_BUILTIN
 		if (tmpPath[0] == '\0' || strEqCI(tmpPath, "builtin") || strEqCI(tmpPath, "default"))
 			loadBuiltinSkin();
-		return;
+#endif
 	}
 
 	if (File != NULL) {
