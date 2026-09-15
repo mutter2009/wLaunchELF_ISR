@@ -9,12 +9,17 @@
 #
 # Linkfile script for iop-ld
 #
-# A9VG 定制版：在官方 GNU ld 默认链接脚本基础上，做了两处老工具链
-# (GCC 3.2.3 / binutils 2.14，即 ps2dev/ps2dev:v1.0 镜像) 兼容处理：
-#   1) 去掉所有 SUBALIGN 语法，老 ld 不认识该写法。
-#   2) 把 PROVIDE(_gp = ...) 放进 .data 段内部、紧跟 PROVIDE(_fdata = .)
-#      之后，用 location counter “. + 0x7ff0” 计算，避免段外用 ALIGN()
-#      表达式导致 “undefined symbol `_gp'”。
+# A9VG 定制版 IOP 链接脚本（兼容老工具链 GCC 3.2.3 / binutils 2.14，
+# 即 CI 用的 ps2dev/ps2dev:v1.0 镜像）。基于官方 GNU ld 默认脚本，做了三处兼容：
+#   1) 去掉所有 SUBALIGN 语法——binutils 2.14 的 iop-ld 不认识 SUBALIGN，
+#      会直接 parse error。
+#   2) _gp 用小数据段(.gp)内的普通赋值 "_gp = . + 0x7ff0" 定义。
+#      binutils 2.14 不认 PROVIDE(_gp = ...)：那种写法会让 _gp 始终是
+#      "undefined symbol"，链接报 "undefined symbol `_gp' referenced in expression"。
+#   3) _text_size / _data_size / _bss_size 在 SECTIONS 之前用普通赋值定义成常量。
+#      原因：iop-ld 的 mipsirx 仿真会无条件自动插入 .iopmod 段，里面以 LONG()
+#      引用这四个符号；-dc -r 下若把它们定义在段之后会前向引用失败，所以必须
+#      在 SECTIONS 之前先定义。最终 iopmod 头由 srxfixup 按真实段大小重写。
 # 本文件由仓库自带，不再依赖 ps2sdk master 的实时 linkfile 结构。
 */
 
@@ -26,6 +31,14 @@ ENTRY(_start)
 /* FORCE_COMMON_ALLOCATION */
 /* Do we need any of these for elf?
    __DYNAMIC = 0;    */
+/* 老 binutils 2.14 (iop-ld mipsirx) 会无条件自动插入 .iopmod 段，以 LONG() 引用
+   _gp/_text_size/_data_size/_bss_size。-dc -r 下这些前向引用无法在段后解析，
+   因此在此用普通赋值把它们先定义成常量（PROVIDE 不够，必须“已定义”）。
+   _gp 之后会由 .gp 段重新赋为正确值；size 符号对 -G0 链接仅作占位，srxfixup 会重写 iopmod 头。 */
+_gp = 0x7ff0;
+_text_size = 0;
+_data_size = 0;
+_bss_size = 0;
 SECTIONS
 {
   /* Read-only sections, merged into text segment: */
@@ -90,7 +103,6 @@ SECTIONS
     *(.data)
     *(.gnu.linkonce.d*)
     CONSTRUCTORS
-    PROVIDE(_gp = . + 0x7ff0);
   }
   .data1   : { *(.data1) }
   .ctors         :
@@ -106,9 +118,16 @@ SECTIONS
   /* We want the small data sections together, so single-instruction offsets
      can access them all, and initialized data all before uninitialized, so
      we can shorten the on-disk segment size.  */
-  .sdata     : { *(.sdata) }
-  .lit8 : { *(.lit8) }
-  .lit4 : { *(.lit4) }
+  /* MIPS 小数据段：_gp 必须作为段内普通赋值定义（binutils 2.14 不认 PROVIDE(_gp=...)） */
+  .gp ALIGN(16) :
+  {
+    _gp = . + 0x7ff0;
+    *(.sdata)
+    *(.sdata.*)
+    *(.gnu.linkonce.s.*)
+    *(.lit8)
+    *(.lit4)
+  } =0
   PROVIDE(_edata  =  .);
   PROVIDE (edata = .);
   __bss_start = .;
@@ -123,6 +142,8 @@ SECTIONS
   . = ALIGN(32 / 8);
   PROVIDE(_end = .);
   PROVIDE (end = .);
+  /* .iopmod 段（iop-ld mipsirx 仿真自动插入）会引用以下四个 size 符号，
+     老 binutils 2.14 必须在脚本里显式定义，否则报 undefined symbol。 */
   /* Stabs debugging sections.  */
   .stab 0 : { *(.stab) }
   .stabstr 0 : { *(.stabstr) }
