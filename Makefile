@@ -252,19 +252,21 @@ clean:
 
 rebuild: clean all
 
-# A9VG汉化版：一键生成 6 个常用发布版本
+# A9VG汉化版：一键生成用户指定的 6 个发布版本（与 CI compile.yml 完全一致）
 #   4 个带内置背景图（BG=1，CUSTOM_COLORS 黑底蓝选）：
-#     BOOT-EXFAT.ELF / BOOT-EXFAT-MMCE.ELF / BOOT-EXFAT-MX4SIO.ELF / BOOT-EXFAT-MMCE-MX4SIO.ELF
+#     BOOT-EXFAT-MX4SIO.ELF / BOOT-EXFAT-MMCE.ELF
+#     BOOT-EXFAT-MMCE-XFROM.ELF / BOOT-EXFAT-MX4SIO-XFROM.ELF
 #   2 个无内置背景图（BG=0，自动启用灰白默认色 GREY_COLORS）：
-#     BOOT-EXFAT-MMCE-NOBG.ELF / BOOT-EXFAT-MX4SIO-NOBG.ELF
+#     BOOT-EXFAT-MX4SIO-NOBG.ELF / BOOT-EXFAT-MMCE-NOBG.ELF
+#   （MX4SIO 与 MMCE 都插记忆卡槽、不能共存，故分版本；XFROM 仅带背景）
 # 注意：每次子 make 都 clean，确保 obj/asm 不会把上一版本的宏/背景图混进去。
 release:
-	$(MAKE) clean && $(MAKE) all EXFAT=1
-	$(MAKE) clean && $(MAKE) all EXFAT=1 MMCE=1
-	$(MAKE) clean && $(MAKE) all EXFAT=1 MX4SIO=1
-	$(MAKE) clean && $(MAKE) all EXFAT=1 MMCE=1 MX4SIO=1
-	$(MAKE) clean && $(MAKE) all EXFAT=1 MMCE=1 BG=0
+	$(MAKE) clean && $(MAKE) all EXFAT=1 MX4SIO=1 BG=1
+	$(MAKE) clean && $(MAKE) all EXFAT=1 MMCE=1 BG=1
+	$(MAKE) clean && $(MAKE) all EXFAT=1 MMCE=1 XFROM=1 BG=1
+	$(MAKE) clean && $(MAKE) all EXFAT=1 MX4SIO=1 XFROM=1 BG=1
 	$(MAKE) clean && $(MAKE) all EXFAT=1 MX4SIO=1 BG=0
+	$(MAKE) clean && $(MAKE) all EXFAT=1 MMCE=1 BG=0
 
 info2:
 	$(info -------- wLaunchELF 4.43x_isr --------)
