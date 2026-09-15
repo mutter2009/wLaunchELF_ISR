@@ -1,6 +1,15 @@
 //--------------------------------------------------------------
 //File name:   jpgviewer.c
 //--------------------------------------------------------------
+// A9VG汉化版修改说明：
+//   上游原版把按钮图标写成 "\xff0:..." 这类形式，但 C 的十六进制转义
+//   会贪婪吞掉后续的十六进制字符——'0'~'3' 都是合法十六进制字符，
+//   于是 "\xff0" 被编译器当成 0xFF0（超范围警告）并截断为单个字节 0xF0。
+//   运行时 0xF0 走普通字符路径进入中文解码，解码失败后画成下划线 '_'，
+//   这就是图片查看器底部按键提示"变成下划线"的原因。
+//   修复：与 filer.c 一致，改用相邻字符串拼接 "\xFF" "0:..."（转义正确
+//   终止后与后续文本拼接，字节序列为 FF 30）。
+//--------------------------------------------------------------
 #include "launchelf.h"
 
 static char msg0[MAX_PATH], msg1[MAX_PATH], jpgpath[MAX_PATH];
@@ -102,12 +111,12 @@ static void Command_List(void)
 			printXY(LNG(Right_Joystick_Vertical_Zoom), x, y, setting->color[COLOR_TEXT], TRUE, 0);
 			y += FONT_HEIGHT;
 			if (swapKeys)
-				sprintf(tmp, "\xff1: %s", LNG(FullScreen_Mode));
+				sprintf(tmp, "\xFF" "1: %s", LNG(FullScreen_Mode));
 			else
-				sprintf(tmp, "\xff0: %s", LNG(FullScreen_Mode));
+				sprintf(tmp, "\xFF" "0: %s", LNG(FullScreen_Mode));
 			printXY(tmp, x, y, setting->color[COLOR_TEXT], TRUE, 0);
 			y += FONT_HEIGHT;
-			sprintf(tmp, "\xff3: %s", LNG(Exit_To_Jpg_Browser));
+			sprintf(tmp, "\xFF" "3: %s", LNG(Exit_To_Jpg_Browser));
 			printXY(tmp, x, y, setting->color[COLOR_TEXT], TRUE, 0);
 			y += FONT_HEIGHT;
 
@@ -173,13 +182,13 @@ static void View_Render(void)
 	// Draw color8 graph4
 	gsKit_prim_sprite(gsGlobal, ScreenPosX, ScreenPosY, ScreenPosX1, ScreenPosY1, 0, setting->color[COLOR_GRAPH4]);
 	// Draw picture
-	if (PicRotate == 0 || PicRotate == 1 || PicRotate == 3) {  // No rotation, rotate +90�, -90�
+	if (PicRotate == 0 || PicRotate == 1 || PicRotate == 3) {  // No rotation, rotate +90°, -90°
 		gsKit_prim_sprite_texture(gsGlobal,
 		                          &TexPicture,
 		                          ScreenPosX + ScreenOffsetX, ScreenPosY + ScreenOffsetY, PanPosX, PanPosY,
 		                          ScreenPosX1 - ScreenOffsetX, ScreenPosY1 - ScreenOffsetY, PanPosX1, PanPosY1,
 		                          0, GS_SETREG_RGBAQ(Brightness * 1.28f, Brightness * 1.28f, Brightness * 1.28f, 0x80, 0x00));
-	} else if (PicRotate == 2) {  // Rotate 180�
+	} else if (PicRotate == 2) {  // Rotate 180°
 		gsKit_prim_sprite_texture(gsGlobal,
 		                          &TexPicture,
 		                          ScreenPosX + ScreenOffsetX, ScreenPosY + ScreenOffsetY, PanPosX1, PanPosY1,
@@ -812,13 +821,13 @@ void JpgViewer(char *file)
 			//Tooltip section
 			msg1[0] = '\0';
 			if (swapKeys)
-				sprintf(msg1, "\xff1:%s", LNG(View));
+				sprintf(msg1, "\xFF" "1:%s", LNG(View));
 			else
-				sprintf(msg1, "\xff0:%s", LNG(View));
+				sprintf(msg1, "\xFF" "0:%s", LNG(View));
 			if (jpg_browser_mode == LIST)
-				sprintf(tmp, " \xff3:%s \xff2:%s", LNG(Up), LNG(Thumb));
+				sprintf(tmp, " \xFF" "3:%s \xFF" "2:%s", LNG(Up), LNG(Thumb));
 			else
-				sprintf(tmp, " \xff3:%s \xff2:%s", LNG(Up), LNG(List));
+				sprintf(tmp, " \xFF" "3:%s \xFF" "2:%s", LNG(Up), LNG(List));
 			strcat(msg1, tmp);
 			sprintf(tmp, " Sel:%s Start:%s L1/R1:%dsec L2:",
 			        LNG(Exit), LNG(SlideShow), SlideShowTime);

@@ -1113,21 +1113,15 @@ void drawChar2(int n, int x, int y, u64 colour)
 {
 	unsigned int i, j;
 	u8 b;
-	int cx;
-	// 8x8 ELISA -> 12x16: 8 rows @ 2px high = 16px, columns 2,1,2,1,2,1,2,1 = 12px
-	static const int col_w[8] = { 2, 1, 2, 1, 2, 1, 2, 1 };
 
 	updateScr_1 = 1;
 
 	for (i = 0; i < 8; i++) {
 		b = elisaFnt[n + i];
-		cx = x;
 		for (j = 0; j < 8; j++) {
 			if (b & 0x80) {
-				gsKit_prim_sprite(gsGlobal, cx, y + i * 2,
-				                  cx + col_w[j], y + i * 2 + 2, 1, colour);
+				gsKit_prim_sprite(gsGlobal, x + j, y + i * 2 - 2, x + j + 1, y + i * 2, 1, colour);
 			}
-			cx += col_w[j];
 			b = b << 1;
 		}
 	}
@@ -1135,22 +1129,52 @@ void drawChar2(int n, int x, int y, u64 colour)
 //------------------------------
 //endfunc drawChar2
 //--------------------------------------------------------------
+// A9VG汉化版：按“真实渲染宽度”估算字符串像素宽（给定 text_spacing）。
+// 旧逻辑用 strlen(s)*spacing 估算，UTF-8 中文每字 3 字节被算成 24px，
+// 而 CJK 字模实际只画 16px，导致底部按键提示（中英混排）被误判为超长，
+// 字符间距被压缩到 5px 后所有字互相重叠（视觉上挤成一坨、像下划线）。
+// 这里与 printXY 渲染循环采用完全相同的推进规则：
+//   ASCII +spacing；"\xff?" 按钮符号 +2*spacing；
+//   CJK/多字节序列 +(cn_glyph_width*spacing)/8。
+static int calc_render_width(const char *s, int spacing)
+{
+	unsigned int c1, c2;
+	int w = 0, i = 0;
+
+	while ((c1 = (unsigned char)s[i++]) != 0) {
+		if (c1 != 0xFF) {
+			if (g_useUTF8 && c1 >= 0x80) {
+				int nb;
+				decode_any((const unsigned char *)s + i - 1, &nb);
+				w += (cn_glyph_width * spacing) / 8;
+				i += nb - 1;
+			} else {
+				w += spacing;
+			}
+			continue;
+		}
+		if ((c2 = (unsigned char)s[i++]) == 0)
+			break;
+		if ((c2 < '0') || (c2 > '='))
+			continue;
+		w += 16;  // 按钮符号固定画两个 8px 半格（渲染循环里不随 spacing 压缩）
+	}
+	return w;
+}
+
+//--------------------------------------------------------------
 // draw a string of characters, without shift-JIS support
 int printXY(const char *s, int x, int y, u64 colour, int draw, int space)
 {
 	unsigned int c1, c2;
 	int i;
 	int text_spacing = 8;
+	// A9VG汉化版：可用宽度放宽到右缘 SCREEN_MARGIN（原为再减 2*FONT_WIDTH），
+	// 底部按键提示允许向右延展铺满整行，只在真正放不下时才逐级压缩间距。
+	int avail = (space > 0) ? space : (SCREEN_WIDTH - SCREEN_MARGIN);
 
-	if (space > 0) {
-		while ((strlen(s) * text_spacing) > space)
-			if (--text_spacing <= 5)
-				break;
-	} else {
-		while ((strlen(s) * text_spacing) > SCREEN_WIDTH - SCREEN_MARGIN - FONT_WIDTH * 2)
-			if (--text_spacing <= 5)
-				break;
-	}
+	while (text_spacing > 5 && calc_render_width(s, text_spacing) > avail)
+		text_spacing--;
 
 	i = 0;
 	while ((c1 = (unsigned char)s[i++]) != 0) {
@@ -1173,7 +1197,7 @@ int printXY(const char *s, int x, int y, u64 colour, int draw, int space)
 					drawChar(c1, x, y, colour);
 				x += text_spacing;
 			}
-			if (x > SCREEN_WIDTH - SCREEN_MARGIN - FONT_WIDTH)
+			if (x > SCREEN_WIDTH - SCREEN_MARGIN)
 				break;
 			continue;
 		}  //End if for normal character
@@ -1191,12 +1215,12 @@ int printXY(const char *s, int x, int y, u64 colour, int draw, int space)
 		if (draw)
 			drawChar(c1, x, y, colour);
 		x += 8;
-		if (x > SCREEN_WIDTH - SCREEN_MARGIN - FONT_WIDTH)
+		if (x > SCREEN_WIDTH - SCREEN_MARGIN)
 			break;
 		if (draw)
 			drawChar(c1 + 1, x, y, colour);
 		x += 8;
-		if (x > SCREEN_WIDTH - SCREEN_MARGIN - FONT_WIDTH)
+		if (x > SCREEN_WIDTH - SCREEN_MARGIN)
 			break;
 	}  // ends while(1)
 	return x;
@@ -1262,7 +1286,9 @@ int printXY_sjis(const unsigned char *s, int x, int y, u64 colour, int draw)
 					break;
 				default:
 					if (elisaFnt != NULL) {  // elisa font is available ?
-						tmp = y;  // drawChar2 now renders 12x16, same row height as Chinese
+						tmp = y;
+						if (code <= 0x829A)
+							tmp++;
 						// SJIS����EUC�ɕϊ�
 						if (code >= 0xE000)
 							code -= 0x4000;
@@ -1294,7 +1320,7 @@ int printXY_sjis(const unsigned char *s, int x, int y, u64 colour, int draw)
 						if (n >= 0 && n <= 55008) {
 							if (draw)
 								drawChar2(n, x, tmp, colour);
-							// A9VG汉化版：日文字符渲染为 12x16，推进 12px（比中文 16 窄）
+							// A9VG汉化版：日文字符宽度从 9 加到 12（16x12 风格，比中文 16 窄）
 							x += 12;
 						} else {
 							if (draw)
