@@ -1113,16 +1113,22 @@ void drawChar2(int n, int x, int y, u64 colour)
 {
 	unsigned int i, j;
 	u8 b;
+	int cx;
+	// 8x8 ELISA -> 12x16: 8 rows @ 2px high = 16px, columns 2,1,2,1,2,1,2,1 = 12px
+	static const int col_w[8] = { 2, 1, 2, 1, 2, 1, 2, 1 };
 
 	updateScr_1 = 1;
 
 	for (i = 0; i < 8; i++) {
 		b = elisaFnt[n + i];
+		cx = x;
 		for (j = 0; j < 8; j++) {
 			if (b & 0x80) {
-				gsKit_prim_sprite(gsGlobal, x + j, y + i * 2 - 2, x + j + 1, y + i * 2, 1, colour);
+				gsKit_prim_sprite(gsGlobal, cx, y + i * 2,
+				                  cx + col_w[j], y + i * 2 + 2, 1, colour);
 			}
 			b = b << 1;
+			cx += col_w[j];
 		}
 	}
 }
@@ -1286,9 +1292,7 @@ int printXY_sjis(const unsigned char *s, int x, int y, u64 colour, int draw)
 					break;
 				default:
 					if (elisaFnt != NULL) {  // elisa font is available ?
-						tmp = y;
-						if (code <= 0x829A)
-							tmp++;
+						tmp = y;  // drawChar2 now renders 12x16, same row height as Chinese
 						// SJIS����EUC�ɕϊ�
 						if (code >= 0xE000)
 							code -= 0x4000;

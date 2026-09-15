@@ -48,6 +48,8 @@ min_size() {
     bdmfs_fatfs.irx)  echo 20000 ;;
     usbmass_bd.irx)   echo 5000 ;;
     ps2smap.irx)      echo 8000 ;;
+    mx4sio_bd.irx)    echo 8000 ;;
+    mmceman.irx)      echo 20000 ;;
     *)                echo 0 ;;
   esac
 }
@@ -69,7 +71,9 @@ need_string() {
 rc=0
 
 echo "--- 必需 USB/BDM 驱动 (EXFAT=1 构建一定用到) ---"
-for irx in bdm.irx bdmfs_fatfs.irx usbmass_bd.irx; do
+# 注意：BDM 家族（bdm / bdmfs_fatfs / usbmass_bd / mx4sio_bd）必须来自同一套源码+工具链，
+# 新旧混编会导致 ABI 错位、设备注册失败（v22 USB / v23 MX4SIO 两次翻车的根因）。
+for irx in bdm.irx bdmfs_fatfs.irx usbmass_bd.irx mx4sio_bd.irx mmceman.irx; do
   f="$IRX_DIR/$irx"
   if [ ! -f "$f" ]; then
     echo "ERROR: 缺少必需驱动 $f （上游 israpps/wLaunchELF_ISR 应在 iop/__precompiled/ 提交此文件）" >&2
