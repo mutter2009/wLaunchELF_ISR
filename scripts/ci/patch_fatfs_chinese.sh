@@ -52,6 +52,12 @@ min_size() {
   esac
 }
 
+# CP936（简体中文 GBK）版 bdmfs_fatfs.irx 的体积下限。
+# 上游默认版仅 ~37724 字节（CODE_PAGE=869 希腊，无中文长名），
+# CP936 版因内嵌 GBK 双向码表（uni2oem936/oem2uni936 各约 87KB）约 210KB。
+# 低于此阈值即视为「未开启中文长名」，USB 里的中文名会退化成 ~1 短名。
+CP936_MIN_SIZE=150000
+
 # 需要包含的特征字符串（用于区分「上游 exFAT 版」与别的版本），没有则为空。
 need_string() {
   case "$1" in
@@ -80,7 +86,15 @@ for irx in bdm.irx bdmfs_fatfs.irx usbmass_bd.irx; do
   pat=$(need_string "$irx")
   if [ -n "$pat" ]; then
     if grep -aq "$pat" "$f" 2>/dev/null; then
-      echo "OK: $irx (${sz} 字节, 含 '${pat}' 特征 -> 支持 exFAT/UTF-8 长名)"
+      if [ "$irx" = "bdmfs_fatfs.irx" ] && [ "$sz" -lt "$CP936_MIN_SIZE" ]; then
+        echo "WARN: $irx (${sz} 字节) 含 '${pat}' 但体积偏小 -> 疑似上游 CP869 默认版（无中文长名），"
+        echo "       USB 里的简体中文文件名会退化成 ~1 短名。请替换为 CP936(GBK) 预编译版（约 210KB）。"
+      else
+        echo "OK: $irx (${sz} 字节, 含 '${pat}' 特征 -> 支持 exFAT/长名)"
+        if [ "$irx" = "bdmfs_fatfs.irx" ]; then
+          echo "     体积 >= ${CP936_MIN_SIZE} 字节 -> 已启用 CP936(GBK) 代码页，中文长名可完整显示。"
+        fi
+      fi
     else
       echo "WARN: $irx (${sz} 字节) 未检出 '${pat}' 特征，可能不是上游 exFAT 版驱动"
     fi
