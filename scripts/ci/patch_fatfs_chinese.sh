@@ -1,7 +1,7 @@
 #!/bin/bash
 #=============================================================================
 # Patch FatFs for Chinese (GBK / CP936) long file names on FAT32 + exFAT
-# (wLaunchELF_ISR 专用版 v9)
+# (wLaunchELF_ISR 专用版 v10)
 #-----------------------------------------------------------------------------
 # ISR 架构关键点：embed.make 从仓库内 iop/__precompiled/bdmfs_fatfs.irx 把文件
 # 系统驱动嵌入 ELF（EXFAT=1 与否用的都是同一个文件）。因此必须把重编产物覆盖到
@@ -15,19 +15,20 @@
 #        find 误取到 ee/startup/linkfile（EE 脚本含 _text_size），链接报
 #        "undefined symbol _text_size"。
 #   v8 : compile.yml 安装 build-base，修 host gcc 缺失（srxfixup 无法编译）。
-#   v9 : 不再引用安装版 linkfile（路径不可靠）。改为就地修补 master clone 里
-#        确定存在的 $PS2SDKSRC/iop/startup/src/linkfile：
-#          - 去掉 SUBALIGN(...)
-#          - 删除段外 PROVIDE(_gp = ALIGN(16)+0x7ff0)，在 .data 段内 _fdata 后
-#            插入 PROVIDE(_gp = . + 0x7ff0)（location counter，老 ld 可求值）
-#        并显式把 IOP_LINKFILE 指向修好的文件。彻底绕开 _gp / _text_size。
+#   v9 : 就地修补 master clone 的 IOP linkfile（去 SUBALIGN + _gp 移入 .data）。
+#        但 master 是滚动分支，不同时刻结构不一致，补丁命中不全，仍偶发
+#        "undefined symbol _gp"。
+#   v10: 不再实时修补 master 的 linkfile。仓库内置一份经过验证、兼容老工具链
+#        (GCC 3.2.3 / binutils 2.14) 的完整 IOP linkfile
+#        (scripts/ci/iop_linkfile_a9vg)，直接覆盖 master clone 的 linkfile 并让
+#        IOP_LINKFILE 指向它。完全不依赖 master 的实时结构，确定性最高。
 #
 # 设置 ALLOW_UNPATCHED_FATFS=1 可跳过体积校验（不建议）。
 #=============================================================================
 set -u
 
 echo "=========================================="
-echo "FatFs Chinese LFN patch script (ISR edition v9)"
+echo "FatFs Chinese LFN patch script (ISR edition v10)"
 PS2SDK="${PS2SDK:-/usr/local/ps2dev/ps2sdk}"
 WORKSPACE="${GITHUB_WORKSPACE:-$PWD}"
 ALLOW_UNPATCHED_FATFS="${ALLOW_UNPATCHED_FATFS:-0}"
@@ -249,68 +250,49 @@ fi
 MAKE_FLAGS=""
 
 # ---------------------------------------------------------------------------
-# 5) IOP linkfile 修复（老 binutils 2.14 兼容）
+# 5) IOP linkfile：直接用仓库内置的静态兼容版，覆盖 master clone 的 linkfile
 #
-#   重编 bdmfs_fatfs 时，iop/Rules.make 默认用 $(PS2SDKSRC)/iop/startup/src/linkfile，
-#   也就是我们克隆的 master 源码树里那个。master 的 linkfile 用了：
-#     - SUBALIGN(16)            : 老 ld 不认识，报 "parse error"
-#     - PROVIDE(_gp = ALIGN(16) + 0x7ff0) : 段外的 ALIGN() 表达式老 ld 算不了，
-#       报 "undefined symbol `_gp'"
+#   重编 bdmfs_fatfs 时，iop/Rules.make 默认用 $(PS2SDKSRC)/iop/startup/src/linkfile。
+#   ps2sdk master 是滚动分支，其 linkfile 结构随时会变；之前用 sed/awk 实时补丁
+#   它，先后踩过 SUBALIGN(parse error) 和 _gp(undefined symbol) 两个坑，且不同
+#   时刻的 master 结构不一致导致补丁命中不全。
 #
-#   重要坑：不要去引用安装版 ps2sdk 的 linkfile。
-#   ps2dev/ps2dev:v1.0 镜像里 $PS2SDK/iop/startup/src/linkfile 并不存在，
-#   find $PS2SDK -name linkfile 会按字母序误取到 ee/startup/linkfile（EE 的链接
-#   脚本，含 _text_size），导致链接报 "undefined symbol _text_size"。
-#
-#   修复：直接就地修改 master clone 里确定存在的 IOP linkfile：
-#     1) 去掉所有 SUBALIGN(...)
-#     2) 删除段外的旧 PROVIDE(_gp = ...)，在 .data 段内 _fdata 之后插入
-#        PROVIDE(_gp = . + 0x7ff0);   （用 location counter，老 ld 能稳定求值）
-#   然后显式把 IOP_LINKFILE 指向修好的这个文件。
+#   解决方案：仓库自带一份经过验证、兼容老工具链 (GCC 3.2.3 / binutils 2.14，
+#   即 ps2dev/ps2dev:v1.0 镜像) 的完整 IOP linkfile（scripts/ci/iop_linkfile_a9vg）：
+#     - 无 SUBALIGN(...)
+#     - PROVIDE(_gp = . + 0x7ff0) 在 .data 段内部、_fdata 之后（用 location
+#       counter 计算，老 ld 稳定可求）
+#   直接把它复制到 master clone 的 linkfile 路径并覆盖，再让 IOP_LINKFILE 指向它。
+#   这样完全不依赖 master 的实时结构，确定性最高。
 # ---------------------------------------------------------------------------
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+SHIPPED_LINKFILE="$SCRIPT_DIR/iop_linkfile_a9vg"
 LINKFILE="$PS2SDKSRC/iop/startup/src/linkfile"
-if [ -f "$LINKFILE" ]; then
-  echo ">>> Patching IOP linkfile for old binutils: $LINKFILE"
-  cp -f "$LINKFILE" "$LINKFILE.orig"
-
-  # 1) 去掉所有 SUBALIGN(...)
-  sed -i -E 's/[[:space:]]*SUBALIGN\([0-9]+\)//g' "$LINKFILE"
-
-  # 2) 删除段外旧 _gp 行，在 .data 段内 _fdata 之后插入新 _gp（用 . 计算）
-  awk '
-    {
-      if ($0 ~ /PROVIDE\(_gp = [^;]*;/) { next }
-      print;
-      if ($0 ~ /PROVIDE\(_fdata = \.\);/) {
-        match($0, /^[[:space:]]*/);
-        indent = substr($0, 1, RLENGTH);
-        print indent "PROVIDE(_gp = . + 0x7ff0);";
-      }
-    }
-  ' "$LINKFILE" > "$LINKFILE.tmp" && mv -f "$LINKFILE.tmp" "$LINKFILE"
-
-  if grep -q "SUBALIGN" "$LINKFILE"; then
-    echo "ERROR: SUBALIGN still present after patch" >&2
-    exit 1
-  fi
-  if ! grep -qE 'PROVIDE\(_gp = \. \+ 0x7ff0\)' "$LINKFILE"; then
-    echo "ERROR: _gp was not patched into .data section" >&2
-    exit 1
-  fi
-
-  echo "Original _gp line (from .orig):"
-  grep -n 'PROVIDE(_gp' "$LINKFILE.orig" || true
-  echo "Patched _gp line:"
-  grep -n 'PROVIDE(_gp' "$LINKFILE" || true
-  echo "OK: IOP linkfile patched (SUBALIGN removed, _gp inside .data)."
-
-  # 显式指向修好的 linkfile
-  export IOP_LINKFILE="$LINKFILE"
-  MAKE_FLAGS="$MAKE_FLAGS IOP_LINKFILE=$LINKFILE"
-  echo "IOP_LINKFILE=$IOP_LINKFILE"
-else
-  echo "WARN: $LINKFILE not found; relying on default IOP_LINKFILE."
+if [ ! -f "$SHIPPED_LINKFILE" ]; then
+  echo "ERROR: shipped linkfile not found at $SHIPPED_LINKFILE" >&2
+  exit 1
 fi
+echo ">>> Installing A9VG IOP linkfile (old-binutils compatible) ..."
+echo "    source : $SHIPPED_LINKFILE"
+echo "    target : $LINKFILE"
+mkdir -p "$(dirname "$LINKFILE")"
+cp -f "$SHIPPED_LINKFILE" "$LINKFILE"
+if [ ! -f "$LINKFILE" ]; then
+  echo "ERROR: failed to install IOP linkfile to $LINKFILE" >&2
+  exit 1
+fi
+if grep -qE 'SUBALIGN\([0-9]' "$LINKFILE"; then
+  echo "ERROR: installed linkfile unexpectedly contains SUBALIGN syntax" >&2
+  exit 1
+fi
+if ! grep -qE 'PROVIDE\(_gp = \. \+ 0x7ff0\)' "$LINKFILE"; then
+  echo "ERROR: installed linkfile missing _gp inside .data section" >&2
+  exit 1
+fi
+echo "OK: IOP linkfile installed (SUBALIGN-free, _gp inside .data)."
+export IOP_LINKFILE="$LINKFILE"
+MAKE_FLAGS="$MAKE_FLAGS IOP_LINKFILE=$LINKFILE"
+echo "IOP_LINKFILE=$IOP_LINKFILE"
 
 # ---------------------------------------------------------------------------
 # 6) 重编 bdmfs_fatfs（这是唯一需要 CP936 的模块）
