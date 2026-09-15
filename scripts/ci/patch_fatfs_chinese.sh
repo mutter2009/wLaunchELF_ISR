@@ -1,31 +1,33 @@
 #!/bin/bash
 #=============================================================================
 # Patch FatFs for Chinese (GBK / CP936) long file names on FAT32 + exFAT
-# (wLaunchELF_ISR 专用版 v7)
+# (wLaunchELF_ISR 专用版 v9)
 #-----------------------------------------------------------------------------
 # ISR 架构关键点：embed.make 从仓库内 iop/__precompiled/bdmfs_fatfs.irx 把文件
 # 系统驱动嵌入 ELF（EXFAT=1 与否用的都是同一个文件）。因此必须把重编产物覆盖到
 # iop/__precompiled/ 才生效，只装到 $PS2SDK/iop/irx 是没用的。
 #
 # 版本演进
-#   v5 : 自动探测 IOP 编译器是否支持 C99；不支持时才给 ff.h 打补丁；
-#        对 IOP linkfile 做 GCC 3.2.3 兼容补丁（_gp 移到 .data 段内）。
-#        但 v1.0 镜像下 make 用的还是 master clone 的 linkfile，_gp 错误反复出现。
-#   v6 : 换成 ghcr.io/ps2homebrew/ps2homebrew:main 镜像，结果 EE 阶段缺少旧版
-#        libjpg，israpps 代码依赖 jpgOpenRAW 等旧 API，新镜像里没有。
-#   v7 : 回到 ps2dev/ps2dev:v1.0 镜像，但重编 bdmfs_fatfs 时显式使用镜像自带的
-#        IOP linkfile（$PS2SDK/iop/startup/src/linkfile），而不是 master clone 里
-#        不兼容老 ld 的 linkfile。这样同时保留：
-#          - 旧版 libjpg 头文件/库可用
-#          - FatFs 源码可重编并替换
-#          - 绕过 master linkfile 的 _gp / SUBALIGN 问题
+#   v5 : 自动探测 IOP 编译器是否支持 C99；不支持时才给 ff.h 打补丁。
+#   v6 : 换成 ps2homebrew:main 镜像，EE 阶段缺旧版 libjpg（jpgOpenRAW 等 API），回退。
+#   v7 : 回 ps2dev/ps2dev:v1.0 镜像，重编时引用安装版 IOP linkfile。
+#        但 v1.0 镜像里 $PS2SDK/iop/startup/src/linkfile 并不存在，
+#        find 误取到 ee/startup/linkfile（EE 脚本含 _text_size），链接报
+#        "undefined symbol _text_size"。
+#   v8 : compile.yml 安装 build-base，修 host gcc 缺失（srxfixup 无法编译）。
+#   v9 : 不再引用安装版 linkfile（路径不可靠）。改为就地修补 master clone 里
+#        确定存在的 $PS2SDKSRC/iop/startup/src/linkfile：
+#          - 去掉 SUBALIGN(...)
+#          - 删除段外 PROVIDE(_gp = ALIGN(16)+0x7ff0)，在 .data 段内 _fdata 后
+#            插入 PROVIDE(_gp = . + 0x7ff0)（location counter，老 ld 可求值）
+#        并显式把 IOP_LINKFILE 指向修好的文件。彻底绕开 _gp / _text_size。
 #
 # 设置 ALLOW_UNPATCHED_FATFS=1 可跳过体积校验（不建议）。
 #=============================================================================
 set -u
 
 echo "=========================================="
-echo "FatFs Chinese LFN patch script (ISR edition v7)"
+echo "FatFs Chinese LFN patch script (ISR edition v9)"
 PS2SDK="${PS2SDK:-/usr/local/ps2dev/ps2sdk}"
 WORKSPACE="${GITHUB_WORKSPACE:-$PWD}"
 ALLOW_UNPATCHED_FATFS="${ALLOW_UNPATCHED_FATFS:-0}"
@@ -247,33 +249,67 @@ fi
 MAKE_FLAGS=""
 
 # ---------------------------------------------------------------------------
-# 5) IOP linkfile 选择（关键：老工具链要避开 master clone 里的 linkfile）
+# 5) IOP linkfile 修复（老 binutils 2.14 兼容）
 #
-#    ps2sdk master 的 IOP linkfile 用了 SUBALIGN(16) 和
-#    PROVIDE(_gp = ALIGN(16) + 0x7ff0)。GCC 3.2.3 / binutils 2.14 的老 ld
-#    无法解析，会报 "parse error" 或 "undefined symbol `_gp'".
+#   重编 bdmfs_fatfs 时，iop/Rules.make 默认用 $(PS2SDKSRC)/iop/startup/src/linkfile，
+#   也就是我们克隆的 master 源码树里那个。master 的 linkfile 用了：
+#     - SUBALIGN(16)            : 老 ld 不认识，报 "parse error"
+#     - PROVIDE(_gp = ALIGN(16) + 0x7ff0) : 段外的 ALIGN() 表达式老 ld 算不了，
+#       报 "undefined symbol `_gp'"
 #
-#    而 ps2dev/ps2dev:v1.0 镜像自带的 ps2sdk 安装版 linkfile
-#    ($PS2SDK/iop/startup/src/linkfile) 和老工具链是配套的，能正常链接。
-#    israpps 官方 CI 直接用 make rebuild 成功就是证据。
+#   重要坑：不要去引用安装版 ps2sdk 的 linkfile。
+#   ps2dev/ps2dev:v1.0 镜像里 $PS2SDK/iop/startup/src/linkfile 并不存在，
+#   find $PS2SDK -name linkfile 会按字母序误取到 ee/startup/linkfile（EE 的链接
+#   脚本，含 _text_size），导致链接报 "undefined symbol _text_size"。
 #
-#    因此策略：重编 bdmfs_fatfs 时，强制 IOP_LINKFILE 指向安装版 linkfile，
-#    完全绕过 master clone 里不兼容的 linkfile。
+#   修复：直接就地修改 master clone 里确定存在的 IOP linkfile：
+#     1) 去掉所有 SUBALIGN(...)
+#     2) 删除段外的旧 PROVIDE(_gp = ...)，在 .data 段内 _fdata 之后插入
+#        PROVIDE(_gp = . + 0x7ff0);   （用 location counter，老 ld 能稳定求值）
+#   然后显式把 IOP_LINKFILE 指向修好的这个文件。
 # ---------------------------------------------------------------------------
-INSTALLED_LINKFILE="$PS2SDK/iop/startup/src/linkfile"
-if [ ! -f "$INSTALLED_LINKFILE" ]; then
-  # 如果标准位置没有，尝试在 $PS2SDK 下任意位置找一个 linkfile
-  INSTALLED_LINKFILE="$(find "$PS2SDK" -maxdepth 5 -name 'linkfile' -type f 2>/dev/null | head -1)"
-fi
+LINKFILE="$PS2SDKSRC/iop/startup/src/linkfile"
+if [ -f "$LINKFILE" ]; then
+  echo ">>> Patching IOP linkfile for old binutils: $LINKFILE"
+  cp -f "$LINKFILE" "$LINKFILE.orig"
 
-if [ -f "$INSTALLED_LINKFILE" ]; then
-  echo ">>> Using installed ps2sdk IOP linkfile: $INSTALLED_LINKFILE"
-  MAKE_FLAGS="$MAKE_FLAGS IOP_LINKFILE=$INSTALLED_LINKFILE"
-  echo "    (avoids master linkfile _gp/SUBALIGN issues on old binutils)"
+  # 1) 去掉所有 SUBALIGN(...)
+  sed -i -E 's/[[:space:]]*SUBALIGN\([0-9]+\)//g' "$LINKFILE"
+
+  # 2) 删除段外旧 _gp 行，在 .data 段内 _fdata 之后插入新 _gp（用 . 计算）
+  awk '
+    {
+      if ($0 ~ /PROVIDE\(_gp = [^;]*;/) { next }
+      print;
+      if ($0 ~ /PROVIDE\(_fdata = \.\);/) {
+        match($0, /^[[:space:]]*/);
+        indent = substr($0, 1, RLENGTH);
+        print indent "PROVIDE(_gp = . + 0x7ff0);";
+      }
+    }
+  ' "$LINKFILE" > "$LINKFILE.tmp" && mv -f "$LINKFILE.tmp" "$LINKFILE"
+
+  if grep -q "SUBALIGN" "$LINKFILE"; then
+    echo "ERROR: SUBALIGN still present after patch" >&2
+    exit 1
+  fi
+  if ! grep -qE 'PROVIDE\(_gp = \. \+ 0x7ff0\)' "$LINKFILE"; then
+    echo "ERROR: _gp was not patched into .data section" >&2
+    exit 1
+  fi
+
+  echo "Original _gp line (from .orig):"
+  grep -n 'PROVIDE(_gp' "$LINKFILE.orig" || true
+  echo "Patched _gp line:"
+  grep -n 'PROVIDE(_gp' "$LINKFILE" || true
+  echo "OK: IOP linkfile patched (SUBALIGN removed, _gp inside .data)."
+
+  # 显式指向修好的 linkfile
+  export IOP_LINKFILE="$LINKFILE"
+  MAKE_FLAGS="$MAKE_FLAGS IOP_LINKFILE=$LINKFILE"
+  echo "IOP_LINKFILE=$IOP_LINKFILE"
 else
-  echo "WARN: cannot find installed IOP linkfile under $PS2SDK"
-  echo "      Will rely on default IOP_LINKFILE in master clone."
-  echo "      If build fails with _gp/SUBALIGN error, the image layout has changed."
+  echo "WARN: $LINKFILE not found; relying on default IOP_LINKFILE."
 fi
 
 # ---------------------------------------------------------------------------
