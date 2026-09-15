@@ -1,7 +1,7 @@
 #!/bin/bash
 #=============================================================================
 # Patch FatFs for Chinese (GBK / CP936) long file names on FAT32 + exFAT
-# (wLaunchELF_ISR 专用版 v18)
+# (wLaunchELF_ISR 专用版 v20)
 #-----------------------------------------------------------------------------
 # ISR 架构关键点：embed.make 从仓库内 iop/__precompiled/bdmfs_fatfs.irx 把文件
 # 系统驱动嵌入 ELF（EXFAT=1 与否用的都是同一个文件）。因此必须把重编产物覆盖到
@@ -64,13 +64,19 @@
 #           同时把 FatFs 的 C99 分支焊死（#elif 0），避免 gnu99 下 #include <stdint.h>
 #           失败（IOP 老工具链没有 stdint.h）。
 #        另：每个模块构建前先 make clean，避免上一次的旧产物被 make 当成最新。
+#   v20: 修 USB"进得了 mass:/ 但列不出文件"的根因。IOP 驱动默认 -Os 编译，GCC 3.2.3
+#        在 -Os 下默认开 -fstrict-aliasing，会把 FatFs 的 LD_DWORD 类型双关（以及
+#        usbmass_bd 读 SCSI 响应的类型双关）错误优化，FAT 表/目录项读出垃圾。
+#        给整条 IOP 驱动链的 IOP_CFLAGS 追加 -fno-strict-aliasing（写在 Rules.make，
+#        在 RULES_BAK 快照之前），覆盖 usbd/bdm/usbmass_bd/bdmfs_fatfs 全部四个模块。
 #
+
 # 设置 ALLOW_UNPATCHED_FATFS=1 可跳过体积校验（不建议）。
 #=============================================================================
 set -u
 
 echo "=========================================="
-echo "FatFs Chinese LFN patch script (ISR edition v18)"
+echo "FatFs Chinese LFN patch script (ISR edition v20)"
 PS2SDK="${PS2SDK:-/usr/local/ps2dev/ps2sdk}"
 WORKSPACE="${GITHUB_WORKSPACE:-$PWD}"
 ALLOW_UNPATCHED_FATFS="${ALLOW_UNPATCHED_FATFS:-0}"
@@ -590,7 +596,18 @@ if [ -f "$RULES_MAKE" ]; then
     if ! grep -qE 'IOP_CFLAGS := .*-fno-common' "$RULES_MAKE"; then
       sed -i -E 's|^(IOP_CFLAGS := -D_IOP -fno-builtin -G0)( .*)$|\1 -fno-common\2|' "$RULES_MAKE"
     fi
-    echo "OK: appended -fno-common to IOP_CFLAGS in $RULES_MAKE"
+    # 老工具链 GCC 3.2.3 在 -Os（IOP_OPTFLAGS 默认）下默认开启 -fstrict-aliasing。
+    # FatFs 的 LD_DWORD/LD_WORD 宏是 *(DWORD*)(BYTE*)ptr 这种类型双关；
+    # libbdm / usbmass_bd 读 USB 描述符、SCSI 响应也大量类型双关。严格别名优化
+    # 会让编译器错误地重排/合并这些内存访问，导致 FAT 表、目录项、SCSI 数据读出
+    # 垃圾——表现正是"进得了 mass:/ 但列不出文件"（FAT32 与 exFAT 都走这条路径，
+    # 两者同时中招，R3Z 用现代 GCC 则没这问题）。关掉这一项不安全优化即可，仅禁别名
+    # 假设，不影响其它优化。必须写进 Rules.make（不能走命令行 IOP_CFLAGS=，否则会冲掉
+    # := 整行的 -I 头文件路径，见 v14 教训），且要在 RULES_BAK 快照之前写入。
+    if ! grep -qE 'IOP_CFLAGS := .*-fno-strict-aliasing' "$RULES_MAKE"; then
+      sed -i -E 's|^(IOP_CFLAGS := -D_IOP -fno-builtin -G0)( .*)$|\1 -fno-strict-aliasing\2|' "$RULES_MAKE"
+    fi
+    echo "OK: appended -fno-common & -fno-strict-aliasing to IOP_CFLAGS in $RULES_MAKE"
   else
     echo "WARN: IOP_CFLAGS line not in expected form; falling back to command-line IOP_CFLAGS=-fno-common" >&2
     MAKE_FLAGS="$MAKE_FLAGS IOP_CFLAGS=-fno-common"
