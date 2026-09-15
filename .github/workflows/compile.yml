@@ -50,7 +50,8 @@ jobs:
     steps:
       - name: Install dependencies
         run: |
-          apk add --no-cache make git zip bash
+          # build-base 提供 host gcc/binutils，重编 bdmfs_fatfs 时编译 srxfixup 需要
+          apk add --no-cache make git zip bash build-base
 
       - name: Checkout
         uses: actions/checkout@v4
