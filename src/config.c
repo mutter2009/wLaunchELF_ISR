@@ -7,7 +7,18 @@
 enum {
 	DEF_TIMEOUT = 10,
 	DEF_HIDE_PATHS = TRUE,
-#ifdef CUSTOM_COLORS
+#ifdef GREY_COLORS
+	/* 无背景图版本的默认配色（截图中的灰白风格）
+	   颜色顺序：背景/边框/选择/文本/文件夹/ELF程序/未知/文本编辑器 */
+	DEF_COLOR1 = GS_SETREG_RGBA(160, 160, 160, 0),  //Backgr  A0A0A0
+	DEF_COLOR2 = GS_SETREG_RGBA(53, 53, 53, 0),     //Frame   353535
+	DEF_COLOR3 = GS_SETREG_RGBA(48, 48, 176, 0),    //Select  3030B0
+	DEF_COLOR4 = GS_SETREG_RGBA(0, 0, 0, 0),        //Text    000000
+	DEF_COLOR5 = GS_SETREG_RGBA(240, 208, 48, 0),   //Graph1  F0D030 文件夹
+	DEF_COLOR6 = GS_SETREG_RGBA(0, 192, 0, 0),        //Graph2  00C000 ELF程序
+	DEF_COLOR7 = GS_SETREG_RGBA(224, 224, 224, 0),  //Graph3  E0E0E0 未知
+	DEF_COLOR8 = GS_SETREG_RGBA(144, 112, 96, 0),   //Graph4  907060 文本编辑器
+#elif defined(CUSTOM_COLORS)
 	DEF_COLOR1 = GS_SETREG_RGBA(0, 0, 0, 0),  //Backgr
 	DEF_COLOR2 = GS_SETREG_RGBA(160, 160, 160, 0),     //Frame
 #ifdef DVRP
@@ -29,7 +40,7 @@ enum {
 	DEF_COLOR6 = GS_SETREG_RGBA(0, 96, 0, 0),       //Graph2
 	DEF_COLOR7 = GS_SETREG_RGBA(224, 224, 224, 0),  //Graph3
 	DEF_COLOR8 = GS_SETREG_RGBA(0, 0, 0, 0),        //Graph4
-#endif //CUSTOM_COLORS
+#endif
 	DEF_MENU_FRAME = TRUE,
 	DEF_MENU = TRUE,
 	DEF_NUMCNF = 1,

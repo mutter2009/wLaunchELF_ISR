@@ -20,7 +20,7 @@ LCDVD ?= LEGACY#or LATEST
 # ----------------------------- #
 .SILENT:
 
-BIN_NAME = $(HAS_EXFAT)$(HAS_DS34)$(HAS_ETH)$(HAS_MX4SIO)$(HAS_MMCE)$(HAS_SMB)$(HAS_DVRP)$(HAS_XFROM)$(HAS_EESIO)$(HAS_UDPTTY)$(HAS_PPCTTY)$(HAS_IOP_RESET)
+BIN_NAME = $(HAS_EXFAT)$(HAS_DS34)$(HAS_ETH)$(HAS_MX4SIO)$(HAS_MMCE)$(HAS_SMB)$(HAS_DVRP)$(HAS_XFROM)$(HAS_EESIO)$(HAS_UDPTTY)$(HAS_PPCTTY)$(HAS_IOP_RESET)$(HAS_NOBG)
 ifeq ($(DEBUG), 0)
   EE_BIN = UNC-BOOT$(BIN_NAME).ELF
   EE_BIN_PKD = BOOT$(BIN_NAME).ELF
@@ -44,12 +44,20 @@ EE_CFLAGS := -mgpopt -G10240 -G0 -DNEWLIB_PORT_AWARE -D_EE
 
 # A9VG汉化版：是否内置默认背景图（src/bg_raw.c，640x448 RGB888）
 #   BG=1（默认）-> 启动时自动显示内置背景；
-#   BG=0        -> 完全不编入这块数据，行为与 israpps 原版一致（排障时用）。
+#   BG=0        -> 完全不编入这块数据，并使用灰白默认配色（GREY_COLORS）。
 #   注意：必须放在上面 EE_CFLAGS := 之后，否则会被简单赋值覆盖掉。
 BG ?= 1
+NOBG_SUFFIX ?= -NOBG
+GREY_COLORS ?= 0
 ifeq ($(BG),1)
     EE_OBJS += bg_raw.o
     EE_CFLAGS += -DA9VG_BG_BUILTIN=1
+else
+    HAS_NOBG = $(NOBG_SUFFIX)
+    GREY_COLORS = 1
+endif
+ifeq ($(GREY_COLORS),1)
+    EE_CFLAGS += -DGREY_COLORS
 endif
 
 BIN2S = @bin2s
@@ -243,6 +251,20 @@ clean:
 	@rm -f iop/*.irx
 
 rebuild: clean all
+
+# A9VG汉化版：一键生成 6 个常用发布版本
+#   4 个带内置背景图（BG=1，CUSTOM_COLORS 黑底蓝选）：
+#     BOOT-EXFAT.ELF / BOOT-EXFAT-MMCE.ELF / BOOT-EXFAT-MX4SIO.ELF / BOOT-EXFAT-MMCE-MX4SIO.ELF
+#   2 个无内置背景图（BG=0，自动启用灰白默认色 GREY_COLORS）：
+#     BOOT-EXFAT-MMCE-NOBG.ELF / BOOT-EXFAT-MX4SIO-NOBG.ELF
+# 注意：每次子 make 都 clean，确保 obj/asm 不会把上一版本的宏/背景图混进去。
+release:
+	$(MAKE) clean && $(MAKE) all EXFAT=1
+	$(MAKE) clean && $(MAKE) all EXFAT=1 MMCE=1
+	$(MAKE) clean && $(MAKE) all EXFAT=1 MX4SIO=1
+	$(MAKE) clean && $(MAKE) all EXFAT=1 MMCE=1 MX4SIO=1
+	$(MAKE) clean && $(MAKE) all EXFAT=1 MMCE=1 BG=0
+	$(MAKE) clean && $(MAKE) all EXFAT=1 MX4SIO=1 BG=0
 
 info2:
 	$(info -------- wLaunchELF 4.43x_isr --------)
