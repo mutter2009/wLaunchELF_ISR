@@ -3,46 +3,38 @@ name: Compile wLaunchELF_ISR (A9VG汉化版)
 on:
   workflow_dispatch:
     inputs:
-      exfat:
-        description: 'EXFAT / BDM 支持（USB 中文长文件名必需）'
-        required: false
-        default: '1'
-      mx4sio:
-        description: 'MX4SIO（SD 卡）支持'
-        required: false
-        default: '1'
-      xfrom:
-        description: '额外编译两个 XFROM 版本'
-        required: false
-        default: '1'
-      bg:
-        description: '内置默认背景图（黑屏排障时选 0 可彻底关闭）'
-        required: false
-        type: choice
-        options: ['1', '0']
-        default: '1'
       fatfs_mode:
-        description: '文件系统驱动方案（off=用仓库原版驱动）'
+        description: '文件系统驱动方案（936=GBK中文长名 / utf8=UTF-8 / off=仓库原版）'
         required: false
         type: choice
         options: ['utf8', '936', 'off']
         default: 'utf8'
 
 env:
-  # ps2homebrew:main 镜像内的 musl 也无法运行 Node24，保留 GitHub 官方兼容开关。
+  # GitHub 于 2025-09 弃用 Node20 并默认强制 Node24，而 israpps 官方 CI 所用的
+  # ps2dev/ps2dev:v1.0 老镜像 musl 无法运行 Node24。此开关是 GitHub 官方文档
+  # 提供的临时方案，允许 Node20 的 JS actions 继续运行（israpps 官方即 Node20
+  # 时代配置）。除汉化 patch 步骤外，本 workflow 与 israpps 官方配置一致。
   ACTIONS_ALLOW_USE_UNSECURE_NODE_VERSION: "true"
 
 jobs:
   #===========================================================================
-  # 单 job，使用 israpps 官方 CI 同款 ps2dev/ps2dev:v1.0 镜像。
+  # 单 job，只用 israpps 官方的 ps2dev/ps2dev:v1.0 镜像。
   #
-  #   该镜像内含与 wLaunchELF_ISR 配套的 ps2sdk 二进制、旧版 libjpg 头文件/库，
-  #   能直接编译 EE 主程序。ps2sdk master 源码仅用于重编 bdmfs_fatfs 驱动，
-  #   重编时显式使用 v1.0 镜像自带的 IOP linkfile，避免 master linkfile 的
-  #   _gp / SUBALIGN 兼容问题。
+  #   曾经试过"再加一个 job 在 ps2dev/ps2dev:latest 里重编 FatFs"，实测翻车：
+  #   那个镜像连 bash 都没有（步骤报 "bash: not found"），装依赖 3 秒就完事，
+  #   基本是 Alpine/musl 系，glibc 编出来的 ps2dev 工具链能不能跑都难说。
+  #   所以回到老镜像 + v5 脚本的 pre-C99 补丁这条路：
+  #   FatFs r0.16 开 exFAT 要求 C99（ff.h: #error exFAT feature wants C99 or
+  #   later / typedef QWORD FSIZE_t），v1.0 的 iop-gcc 是 GCC 3.2.3 不支持，
+  #   脚本会自动探测并在 pre-C99 时给 ff.h 打补丁（去掉 #error + 补 QWORD）。
   #
-  #   Patch 这一步不再 continue-on-error：中文长文件名是汉化版核心功能，
-  #   若此步骤失败，后面的 Build 不应继续用仓库原版驱动出包。
+  #   Patch 这一步 continue-on-error：万一上游又变了，只是少个中文长文件名，
+  #   不会拖垮出包。后面的 Verify 步骤会把不合格的驱动还原成仓库原版。
+  #
+  #   2026-09-15 (v20)：USB 驱动链加 -fno-strict-aliasing，修"进得了 mass:/ 但
+  #   列不出文件"的根因（GCC 3.2.3 在 -Os 下的严格别名把 FatFs 类型双关读坏）。
+  #   同时本 workflow 一次性产出 6 个版本：4 个带内置背景图 + 2 个灰白无背景图。
   #===========================================================================
   build:
     runs-on: ubuntu-latest
@@ -50,7 +42,6 @@ jobs:
     steps:
       - name: Install dependencies
         run: |
-          # build-base 提供 host gcc/binutils，重编 bdmfs_fatfs 时编译 srxfixup 需要
           apk add --no-cache make git zip bash build-base
 
       - name: Checkout
@@ -62,6 +53,7 @@ jobs:
 
       - name: Patch FatFs driver (${{ github.event.inputs.fatfs_mode }})
         if: ${{ github.event.inputs.fatfs_mode != 'off' }}
+        continue-on-error: true
         env:
           FATFS_MODE: ${{ github.event.inputs.fatfs_mode }}
         run: |
@@ -89,25 +81,43 @@ jobs:
           fi
           echo "OK: 将使用重编后的驱动（模式 ${{ github.event.inputs.fatfs_mode }}）"
           echo "======================================================"
-          echo " 本轮构建参数: BG=${{ github.event.inputs.bg }}  FATFS_MODE=${{ github.event.inputs.fatfs_mode }}"
+          echo " 本轮构建：4 个带背景图版本 + 2 个灰白无背景图版本"
+          echo " FATFS_MODE=${{ github.event.inputs.fatfs_mode }}"
           echo "======================================================"
 
-      - name: Build 1/3  BOOT-EXFAT-MX4SIO.ELF
+      - name: Build 1/6  BOOT-EXFAT.ELF (带背景图)
         run: |
-          make rebuild EXFAT=${{ github.event.inputs.exfat }} MX4SIO=${{ github.event.inputs.mx4sio }} BG=${{ github.event.inputs.bg }}
+          make rebuild EXFAT=1 BG=1
           mkdir -p out && cp -f BOOT*.ELF out/
 
-      - name: Build 2/3  BOOT-EXFAT-MX4SIO-XFROM.ELF
-        if: ${{ github.event.inputs.xfrom == '1' }}
+      - name: Build 2/6  BOOT-EXFAT-MMCE.ELF (带背景图)
         run: |
-          make rebuild EXFAT=1 MX4SIO=1 XFROM=1 BG=${{ github.event.inputs.bg }}
+          make rebuild EXFAT=1 MMCE=1 BG=1
           mkdir -p out && cp -f BOOT*.ELF out/
 
-      - name: Build 3/3  BOOT-EXFAT-MMCE-XFROM.ELF
-        if: ${{ github.event.inputs.xfrom == '1' }}
+      - name: Build 3/6  BOOT-EXFAT-MX4SIO.ELF (带背景图)
         run: |
-          make rebuild EXFAT=1 MMCE=1 XFROM=1 BG=${{ github.event.inputs.bg }}
+          make rebuild EXFAT=1 MX4SIO=1 BG=1
           mkdir -p out && cp -f BOOT*.ELF out/
+
+      - name: Build 4/6  BOOT-EXFAT-MMCE-MX4SIO.ELF (带背景图)
+        run: |
+          make rebuild EXFAT=1 MMCE=1 MX4SIO=1 BG=1
+          mkdir -p out && cp -f BOOT*.ELF out/
+
+      - name: Build 5/6  BOOT-EXFAT-MX4SIO-NOBG.ELF (灰白无背景图)
+        run: |
+          make rebuild EXFAT=1 MX4SIO=1 BG=0
+          mkdir -p out && cp -f BOOT*.ELF out/
+
+      - name: Build 6/6  BOOT-EXFAT-MMCE-NOBG.ELF (灰白无背景图)
+        run: |
+          make rebuild EXFAT=1 MMCE=1 BG=0
+          mkdir -p out && cp -f BOOT*.ELF out/
+
+      - name: List built ELF
+        run: |
+          ls -la out/
 
       - name: Upload ELF
         uses: actions/upload-artifact@v4
