@@ -3,38 +3,34 @@ name: Compile wLaunchELF_ISR (A9VG汉化版)
 on:
   workflow_dispatch:
     inputs:
-      fatfs_mode:
-        description: '文件系统驱动方案（936=GBK中文长名 / utf8=UTF-8 / off=仓库原版）'
+      skip_driver_check:
+        description: '跳过 iop/__precompiled 驱动校验（一般不需要）'
         required: false
-        type: choice
-        options: ['utf8', '936', 'off']
-        default: 'utf8'
+        type: boolean
+        default: false
 
 env:
   # GitHub 于 2025-09 弃用 Node20 并默认强制 Node24，而 israpps 官方 CI 所用的
-  # ps2dev/ps2dev:v1.0 老镜像 musl 无法运行 Node24。此开关是 GitHub 官方文档
-  # 提供的临时方案，允许 Node20 的 JS actions 继续运行（israpps 官方即 Node20
-  # 时代配置）。除汉化 patch 步骤外，本 workflow 与 israpps 官方配置一致。
+  # ps2dev/ps2dev:v1.0 老镜像 musl 无法运行 Node24。此开关允许 Node20 的 JS actions
+  # 继续运行。除驱动校验步骤外，本 workflow 与 israpps 官方配置一致。
   ACTIONS_ALLOW_USE_UNSECURE_NODE_VERSION: "true"
 
 jobs:
   #===========================================================================
-  # 单 job，只用 israpps 官方的 ps2dev/ps2dev:v1.0 镜像。
+  # USB 驱动修复（2026-09-15）:
+  #   之前 USB 看不到文件，根因是仓库 iop/__precompiled/ 缺少 bdm/bdmfs_fatfs/
+  #   usbmass_bd 三个驱动（它们本应由 israpps 上游提交），而旧补丁脚本又用老工具链
+  #   从 ps2sdk master 源码把它们重编成了坏二进制。
+  #   现已把上游 israpps/wLaunchELF_ISR 提交的那套 iop/__precompiled/*.irx
+  #   （含 bdm/bdmfs_fatfs/usbmass_bd，支持 exFAT + UTF-8 长名）补全进仓库，
+  #   EE 构建时 embed.make 直接嵌入，不再从源码重编。这与 R3Z（用现代工具链 +
+  #   预编译驱动）能识别 U 盘的做法一致。
   #
-  #   曾经试过"再加一个 job 在 ps2dev/ps2dev:latest 里重编 FatFs"，实测翻车：
-  #   那个镜像连 bash 都没有（步骤报 "bash: not found"），装依赖 3 秒就完事，
-  #   基本是 Alpine/musl 系，glibc 编出来的 ps2dev 工具链能不能跑都难说。
-  #   所以回到老镜像 + v5 脚本的 pre-C99 补丁这条路：
-  #   FatFs r0.16 开 exFAT 要求 C99（ff.h: #error exFAT feature wants C99 or
-  #   later / typedef QWORD FSIZE_t），v1.0 的 iop-gcc 是 GCC 3.2.3 不支持，
-  #   脚本会自动探测并在 pre-C99 时给 ff.h 打补丁（去掉 #error + 补 QWORD）。
-  #
-  #   Patch 这一步 continue-on-error：万一上游又变了，只是少个中文长文件名，
-  #   不会拖垮出包。后面的 Verify 步骤会把不合格的驱动还原成仓库原版。
-  #
-  #   2026-09-15 (v20)：USB 驱动链加 -fno-strict-aliasing，修"进得了 mass:/ 但
-  #   列不出文件"的根因（GCC 3.2.3 在 -Os 下的严格别名把 FatFs 类型双关读坏）。
-  #   同时本 workflow 一次性产出 6 个版本：4 个带内置背景图 + 2 个灰白无背景图。
+  #   本 workflow 一次产出 6 个版本：
+  #     带背景图: BOOT-EXFAT-MX4SIO.ELF / BOOT-EXFAT-MMCE.ELF
+  #               BOOT-EXFAT-MMCE-XFROM.ELF / BOOT-EXFAT-MX4SIO-XFROM.ELF
+  #     无背景浅灰: BOOT-EXFAT-MX4SIO-NOBG.ELF / BOOT-EXFAT-MMCE-NOBG.ELF
+  #   （MX4SIO 与 MMCE 插在同一记忆卡槽、不能共存，故分开两个版本；XFROM 仅带背景）
   #===========================================================================
   build:
     runs-on: ubuntu-latest
@@ -51,43 +47,15 @@ jobs:
           git config --global --add safe.directory "$GITHUB_WORKSPACE"
           git fetch --prune --unshallow
 
-      - name: Patch FatFs driver (${{ github.event.inputs.fatfs_mode }})
-        if: ${{ github.event.inputs.fatfs_mode != 'off' }}
-        continue-on-error: true
-        env:
-          FATFS_MODE: ${{ github.event.inputs.fatfs_mode }}
+      - name: Verify committed USB/BDM drivers
+        if: ${{ inputs.skip_driver_check != true }}
         run: |
           chmod +x scripts/ci/patch_fatfs_chinese.sh
           bash scripts/ci/patch_fatfs_chinese.sh
 
-      - name: Verify FatFs driver
+      - name: Build 1/6  BOOT-EXFAT-MX4SIO.ELF (带背景图)
         run: |
-          set -u
-          IRX="iop/__precompiled/bdmfs_fatfs.irx"
-          MARK="iop/__precompiled/.a9vg_fatfs_ok"
-          if [ ! -f "$MARK" ]; then
-            echo "WARN: FatFs 重编没有成功，使用仓库原版驱动。"
-            echo "      （只是没有中文长文件名，其余功能不受影响，ELF 照常出包）"
-            [ -f "$IRX" ] && git checkout -- "$IRX" || true
-            exit 0
-          fi
-          SIZE=$(wc -c < "$IRX" | tr -d ' ')
-          echo "bdmfs_fatfs.irx = $SIZE bytes (仓库原版 37724)"
-          if [ "$SIZE" -lt 20000 ]; then
-            echo "WARN: 体积异常，疑似坏文件，还原成仓库原版"
-            git checkout -- "$IRX"
-            rm -f "$MARK"
-            exit 0
-          fi
-          echo "OK: 将使用重编后的驱动（模式 ${{ github.event.inputs.fatfs_mode }}）"
-          echo "======================================================"
-          echo " 本轮构建：4 个带背景图版本 + 2 个灰白无背景图版本"
-          echo " FATFS_MODE=${{ github.event.inputs.fatfs_mode }}"
-          echo "======================================================"
-
-      - name: Build 1/6  BOOT-EXFAT.ELF (带背景图)
-        run: |
-          make rebuild EXFAT=1 BG=1
+          make rebuild EXFAT=1 MX4SIO=1 BG=1
           mkdir -p out && cp -f BOOT*.ELF out/
 
       - name: Build 2/6  BOOT-EXFAT-MMCE.ELF (带背景图)
@@ -95,22 +63,22 @@ jobs:
           make rebuild EXFAT=1 MMCE=1 BG=1
           mkdir -p out && cp -f BOOT*.ELF out/
 
-      - name: Build 3/6  BOOT-EXFAT-MX4SIO.ELF (带背景图)
+      - name: Build 3/6  BOOT-EXFAT-MMCE-XFROM.ELF (带背景图)
         run: |
-          make rebuild EXFAT=1 MX4SIO=1 BG=1
+          make rebuild EXFAT=1 MMCE=1 XFROM=1 BG=1
           mkdir -p out && cp -f BOOT*.ELF out/
 
-      - name: Build 4/6  BOOT-EXFAT-MMCE-MX4SIO.ELF (带背景图)
+      - name: Build 4/6  BOOT-EXFAT-MX4SIO-XFROM.ELF (带背景图)
         run: |
-          make rebuild EXFAT=1 MMCE=1 MX4SIO=1 BG=1
+          make rebuild EXFAT=1 MX4SIO=1 XFROM=1 BG=1
           mkdir -p out && cp -f BOOT*.ELF out/
 
-      - name: Build 5/6  BOOT-EXFAT-MX4SIO-NOBG.ELF (灰白无背景图)
+      - name: Build 5/6  BOOT-EXFAT-MX4SIO-NOBG.ELF (无背景浅灰)
         run: |
           make rebuild EXFAT=1 MX4SIO=1 BG=0
           mkdir -p out && cp -f BOOT*.ELF out/
 
-      - name: Build 6/6  BOOT-EXFAT-MMCE-NOBG.ELF (灰白无背景图)
+      - name: Build 6/6  BOOT-EXFAT-MMCE-NOBG.ELF (无背景浅灰)
         run: |
           make rebuild EXFAT=1 MMCE=1 BG=0
           mkdir -p out && cp -f BOOT*.ELF out/
