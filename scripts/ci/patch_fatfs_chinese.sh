@@ -1,7 +1,7 @@
 #!/bin/bash
 #=============================================================================
 # Patch FatFs for Chinese (GBK / CP936) long file names on FAT32 + exFAT
-# (wLaunchELF_ISR 专用版 v11)
+# (wLaunchELF_ISR 专用版 v12)
 #-----------------------------------------------------------------------------
 # ISR 架构关键点：embed.make 从仓库内 iop/__precompiled/bdmfs_fatfs.irx 把文件
 # 系统驱动嵌入 ELF（EXFAT=1 与否用的都是同一个文件）。因此必须把重编产物覆盖到
@@ -18,21 +18,19 @@
 #   v9 : 就地修补 master clone 的 IOP linkfile（去 SUBALIGN + _gp 移入 .data）。
 #        但 master 是滚动分支，不同时刻结构不一致，补丁命中不全，仍偶发
 #        "undefined symbol _gp"。
-#   v11: 修正 v10 链接脚本本身的 bug。v10 把 "_gp" 写成 .data 段内的
-#        PROVIDE(_gp = . + 0x7ff0)，但 binutils 2.14 的 iop-ld 不认这种写法，
-#        导致 _gp 始终是 undefined symbol，链接报 "undefined symbol `_gp'
-#        referenced in expression"。正确做法（已用 ps2dev/ps2dev:v1.0 镜像实测）：
-#        (a) 去掉所有 SUBALIGN；(b) _gp 用小数据段(.gp)内的普通赋值定义；
-#        (c) _text_size/_data_size/_bss_size 在 SECTIONS 之前用普通赋值定义为常量
-#        （iop-ld mipsirx 仿真会无条件自动插入 .iopmod 段并 LONG() 引用这四个符号，
-#        -dc -r 下前向引用必须提前定义）。
+#   v11: 修正 v10 链接脚本本身的 _gp 写法（PROVIDE 在 binutils 2.14 下不定义 _gp，
+#        改为 .gp 段内普通赋值 _gp = . + 0x7ff0，并在 SECTIONS 前定义
+#        _text_size/_data_size/_bss_size 常量）。已用 ps2dev/ps2dev:v1.0 镜像实测可链接。
+#   v12: 把 IOP 链接脚本直接内嵌进本脚本（heredoc），不再依赖仓库里单独的
+#        iop_linkfile_a9vg 文件。原因：v11 交付后用户只更新了 .sh、漏换 .a9vg，
+#        导致脚本与链接脚本版本错配、_text_size 校验失败。自包含后只需替换本脚本一个文件。
 #
 # 设置 ALLOW_UNPATCHED_FATFS=1 可跳过体积校验（不建议）。
 #=============================================================================
 set -u
 
 echo "=========================================="
-echo "FatFs Chinese LFN patch script (ISR edition v11)"
+echo "FatFs Chinese LFN patch script (ISR edition v12)"
 PS2SDK="${PS2SDK:-/usr/local/ps2dev/ps2sdk}"
 WORKSPACE="${GITHUB_WORKSPACE:-$PWD}"
 ALLOW_UNPATCHED_FATFS="${ALLOW_UNPATCHED_FATFS:-0}"
@@ -273,18 +271,214 @@ MAKE_FLAGS=""
 #   直接把它复制到 master clone 的 linkfile 路径并覆盖，再让 IOP_LINKFILE 指向它。
 #   这样完全不依赖 master 的实时结构，确定性最高。
 # ---------------------------------------------------------------------------
-SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
-SHIPPED_LINKFILE="$SCRIPT_DIR/iop_linkfile_a9vg"
+# 5) IOP linkfile：脚本内置一份经过验证、兼容老工具链 (GCC 3.2.3 / binutils 2.14，
+#    即 ps2dev/ps2dev:v1.0 镜像) 的完整 IOP linkfile，用 heredoc 直接写出并覆盖
+#    master clone 的 linkfile。
+#    —— 自包含，不再依赖仓库里单独的 iop_linkfile_a9vg 文件，彻底避免“漏换一个文件”
+#       导致的链接脚本与 patch 脚本版本错配（v11 的 _gp / _text_size 校验失败即由此而来）。
+#       该脚本已在 v1.0 镜像里用真实 iop-ld 实测可链接，关键点：
+#         - 无 SUBALIGN(...)（老 ld 会 parse error）
+#         - _gp 用小数据段(.gp)内的普通赋值 "_gp = . + 0x7ff0" 定义（PROVIDE 写法
+#           在 binutils 2.14 下不会真正定义 _gp）
+#         - _text_size/_data_size/_bss_size 在 SECTIONS 之前用普通赋值定义成常量
+#           （iop-ld mipsirx 仿真会无条件自动插入 .iopmod 段并 LONG() 引用这四个符号，
+#           -dc -r 下前向引用必须提前定义；最终 iopmod 头由 srxfixup 重写）
 LINKFILE="$PS2SDKSRC/iop/startup/src/linkfile"
-if [ ! -f "$SHIPPED_LINKFILE" ]; then
-  echo "ERROR: shipped linkfile not found at $SHIPPED_LINKFILE" >&2
-  exit 1
-fi
-echo ">>> Installing A9VG IOP linkfile (old-binutils compatible) ..."
-echo "    source : $SHIPPED_LINKFILE"
-echo "    target : $LINKFILE"
 mkdir -p "$(dirname "$LINKFILE")"
-cp -f "$SHIPPED_LINKFILE" "$LINKFILE"
+emit_a9vg_linkfile() {
+  cat > "$1" <<'A9VG_LINKFILE_EOF'
+/*
+# _____     ___ ____     ___ ____
+#  ____|   |    ____|   |        | |____|
+# |     ___|   |____ ___|    ____| |    \    PS2DEV Open Source Project.
+#-----------------------------------------------------------------------
+# Copyright ps2dev - http://www.ps2dev.org
+# Licenced under Academic Free License version 2.0
+# Review ps2sdk README & LICENSE files for further details.
+#
+# Linkfile script for iop-ld
+#
+# A9VG 定制版 IOP 链接脚本（兼容老工具链 GCC 3.2.3 / binutils 2.14，
+# 即 CI 用的 ps2dev/ps2dev:v1.0 镜像）。基于官方 GNU ld 默认脚本，做了三处兼容：
+#   1) 去掉所有 SUBALIGN 语法——binutils 2.14 的 iop-ld 不认识 SUBALIGN，
+#      会直接 parse error。
+#   2) _gp 用小数据段(.gp)内的普通赋值 "_gp = . + 0x7ff0" 定义。
+#      binutils 2.14 不认 PROVIDE(_gp = ...)：那种写法会让 _gp 始终是
+#      "undefined symbol"，链接报 "undefined symbol `_gp' referenced in expression"。
+#   3) _text_size / _data_size / _bss_size 在 SECTIONS 之前用普通赋值定义成常量。
+#      原因：iop-ld 的 mipsirx 仿真会无条件自动插入 .iopmod 段，里面以 LONG()
+#      引用这四个符号；-dc -r 下若把它们定义在段之后会前向引用失败，所以必须
+#      在 SECTIONS 之前先定义。最终 iopmod 头由 srxfixup 按真实段大小重写。
+# 本文件由仓库自带，不再依赖 ps2sdk master 的实时 linkfile 结构。
+*/
+
+OUTPUT_FORMAT("elf32-littlemips", "elf32-bigmips",
+        "elf32-littlemips")
+OUTPUT_ARCH(mips)
+ENTRY(_start)
+ SEARCH_DIR("");
+/* FORCE_COMMON_ALLOCATION */
+/* Do we need any of these for elf?
+   __DYNAMIC = 0;    */
+/* 老 binutils 2.14 (iop-ld mipsirx) 会无条件自动插入 .iopmod 段，以 LONG() 引用
+   _gp/_text_size/_data_size/_bss_size。-dc -r 下这些前向引用无法在段后解析，
+   因此在此用普通赋值把它们先定义成常量（PROVIDE 不够，必须“已定义”）。
+   _gp 之后会由 .gp 段重新赋为正确值；size 符号对 -G0 链接仅作占位，srxfixup 会重写 iopmod 头。 */
+_gp = 0x7ff0;
+_text_size = 0;
+_data_size = 0;
+_bss_size = 0;
+SECTIONS
+{
+  /* Read-only sections, merged into text segment: */
+  . = 0x0400000; /* Can conditionally be changed to . = 0x5ffe0000 + SIZEOF_HEADERS; */
+  .interp     : { *(.interp)  } /* Can conditionally be removed */
+  .reginfo ALIGN(16) : { *(.reginfo) }
+  .hash          : { *(.hash)   }
+  .dynsym        : { *(.dynsym)   }
+  .dynstr        : { *(.dynstr)   }
+  .gnu.version   : { *(.gnu.version)  }
+  .gnu.version_d   : { *(.gnu.version_d)  }
+  .gnu.version_r   : { *(.gnu.version_r)  }
+  .rel.text      :
+    { *(.rel.text) *(.rel.gnu.linkonce.t*) }
+  .rela.text     :
+    { *(.rela.text) *(.rela.gnu.linkonce.t*) }
+  .rel.data      :
+    { *(.rel.data) *(.rel.gnu.linkonce.d*) }
+  .rela.data     :
+    { *(.rela.data) *(.rel.gnu.linkonce.d*) }
+  .rel.rodata    :
+    { *(.rel.rodata) *(.rel.gnu.linkonce.r*) }
+  .rela.rodata   :
+    { *(.rela.rodata) *(.rela.gnu.linkonce.r*) }
+  .rel.got       : { *(.rel.got)    }
+  .rela.got      : { *(.rela.got)   }
+  .rel.ctors     : { *(.rel.ctors)  }
+  .rela.ctors    : { *(.rela.ctors) }
+  .rel.dtors     : { *(.rel.dtors)  }
+  .rela.dtors    : { *(.rela.dtors) }
+  .rel.init      : { *(.rel.init) }
+  .rela.init     : { *(.rela.init)  }
+  .rel.fini      : { *(.rel.fini) }
+  .rela.fini     : { *(.rela.fini)  }
+  .rel.bss       : { *(.rel.bss)    }
+  .rela.bss      : { *(.rela.bss)   }
+  .rel.plt       : { *(.rel.plt)    }
+  .rela.plt      : { *(.rela.plt)   }
+  .init          : { *(.init) } =0
+  .plt      : { *(.plt) }
+  .text ALIGN(16) :
+  {
+    PROVIDE(_ftext = . );
+    *(.text)
+    *(.stub)
+    /* .gnu.warning sections are handled specially by elf32.em.  */
+    *(.gnu.warning)
+    *(.gnu.linkonce.t*)
+    *(.mips16.fn.*) *(.mips16.call.*)
+  } =0
+  PROVIDE(_etext = .);
+  PROVIDE (etext = .);
+  .fini      : { *(.fini)    } =0
+  .rodata ALIGN(16) : { *(.rodata) *(.rodata.*) *(.gnu.linkonce.r*) }
+  .rodata1   : { *(.rodata1) }
+  /* Adjust the address for the data segment.  We want to adjust up to
+     the same address within the page on the next page up.  */
+  . = ALIGN(0x40000) + (. & (0x40000 - 1)); /* Can conditionally be changed to . = .; */
+  .data ALIGN(16) :
+  {
+    PROVIDE(_fdata = .);
+    *(.data)
+    *(.gnu.linkonce.d*)
+    CONSTRUCTORS
+  }
+  .data1   : { *(.data1) }
+  .ctors         :
+  {
+    *(.ctors)
+  }
+  .dtors         :
+  {
+    *(.dtors)
+  }
+  .got           : { *(.got.plt) *(.got) }
+  .dynamic       : { *(.dynamic) }
+  /* We want the small data sections together, so single-instruction offsets
+     can access them all, and initialized data all before uninitialized, so
+     we can shorten the on-disk segment size.  */
+  /* MIPS 小数据段：_gp 必须作为段内普通赋值定义（binutils 2.14 不认 PROVIDE(_gp=...)） */
+  .gp ALIGN(16) :
+  {
+    _gp = . + 0x7ff0;
+    *(.sdata)
+    *(.sdata.*)
+    *(.gnu.linkonce.s.*)
+    *(.lit8)
+    *(.lit4)
+  } =0
+  PROVIDE(_edata  =  .);
+  PROVIDE (edata = .);
+  __bss_start = .;
+  PROVIDE(_fbss = .);
+  .sbss      : { *(.sbss) *(.scommon) }
+  .bss ALIGN(16) :
+  {
+   *(.dynbss)
+   *(.bss)
+   *(COMMON)
+  }
+  . = ALIGN(32 / 8);
+  PROVIDE(_end = .);
+  PROVIDE (end = .);
+  /* .iopmod 段（iop-ld mipsirx 仿真自动插入）会引用以下四个 size 符号，
+     老 binutils 2.14 必须在脚本里显式定义，否则报 undefined symbol。 */
+  /* Stabs debugging sections.  */
+  .stab 0 : { *(.stab) }
+  .stabstr 0 : { *(.stabstr) }
+  .stab.excl 0 : { *(.stab.excl) }
+  .stab.exclstr 0 : { *(.stab.exclstr) }
+  .stab.index 0 : { *(.stab.index) }
+  .stab.indexstr 0 : { *(.stab.indexstr) }
+  .comment 0 : { *(.comment) }
+  /* DWARF debug sections.
+     Symbols in the DWARF debugging sections are relative to the beginning
+     of the section so we begin them at 0.  */
+  /* DWARF 1 */
+  .debug          0 : { *(.debug) }
+  .line           0 : { *(.line) }
+  /* GNU DWARF 1 extensions */
+  .debug_srcinfo  0 : { *(.debug_srcinfo) }
+  .debug_sfnames  0 : { *(.debug_sfnames) }
+  /* DWARF 1.1 and DWARF 2 */
+  .debug_aranges  0 : { *(.debug_aranges) }
+  .debug_pubnames 0 : { *(.debug_pubnames) }
+  /* DWARF 2 */
+  .debug_info     0 : { *(.debug_info) }
+  .debug_abbrev   0 : { *(.debug_abbrev) }
+  .debug_line     0 : { *(.debug_line) }
+  .debug_frame    0 : { *(.debug_frame) }
+  .debug_str      0 : { *(.debug_str) }
+  .debug_loc      0 : { *(.debug_loc) }
+  .debug_macinfo  0 : { *(.debug_macinfo) }
+  /* SGI/MIPS DWARF 2 extensions */
+  .debug_weaknames 0 : { *(.debug_weaknames) }
+  .debug_funcnames 0 : { *(.debug_funcnames) }
+  .debug_typenames 0 : { *(.debug_typenames) }
+  .debug_varnames  0 : { *(.debug_varnames) }
+  /* These must appear regardless of  .  */
+  .gptab.sdata : { *(.gptab.data) *(.gptab.sdata) }
+  .gptab.sbss : { *(.gptab.bss) *(.gptab.sbss) }
+  /*
+   * These are the stuff that we don't want to be put in an IRX.
+   */
+  /DISCARD/ : {
+    * ( .MIPS.abiflags )
+  }
+}
+A9VG_LINKFILE_EOF
+}
+emit_a9vg_linkfile "$LINKFILE"
 if [ ! -f "$LINKFILE" ]; then
   echo "ERROR: failed to install IOP linkfile to $LINKFILE" >&2
   exit 1
@@ -305,7 +499,7 @@ if ! grep -qE '_text_size = 0;' "$LINKFILE"; then
 fi
 echo "OK: IOP linkfile installed (SUBALIGN-free, _gp in .gp section, size symbols defined)."
 export IOP_LINKFILE="$LINKFILE"
-MAKE_FLAGS="$MAKE_FLAGS IOP_LINKFILE=$LINKFILE"
+IOP_LINKFILE="$LINKFILE"
 echo "IOP_LINKFILE=$IOP_LINKFILE"
 
 # ---------------------------------------------------------------------------
