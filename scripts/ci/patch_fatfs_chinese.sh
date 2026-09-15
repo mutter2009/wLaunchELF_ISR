@@ -1,7 +1,7 @@
 #!/bin/bash
 #=============================================================================
 # Patch FatFs for Chinese (GBK / CP936) long file names on FAT32 + exFAT
-# (wLaunchELF_ISR 专用版 v12)
+# (wLaunchELF_ISR 专用版 v13)
 #-----------------------------------------------------------------------------
 # ISR 架构关键点：embed.make 从仓库内 iop/__precompiled/bdmfs_fatfs.irx 把文件
 # 系统驱动嵌入 ELF（EXFAT=1 与否用的都是同一个文件）。因此必须把重编产物覆盖到
@@ -24,13 +24,17 @@
 #   v12: 把 IOP 链接脚本直接内嵌进本脚本（heredoc），不再依赖仓库里单独的
 #        iop_linkfile_a9vg 文件。原因：v11 交付后用户只更新了 .sh、漏换 .a9vg，
 #        导致脚本与链接脚本版本错配、_text_size 校验失败。自包含后只需替换本脚本一个文件。
+#   v13: 修 srxfixup "unallocated variable `fs_driver_mount_info'"。老工具链 GCC 3.2.3
+#        默认 -fcommon，未初始化全局进 COMMON 段；binutils 2.14 在 -dc -r 下不把
+#        COMMON 分配进 .bss，老 srxfixup --irx1 因此报未分配变量。给 bdmfs_fatfs 的
+#        IOP 编译加 -fno-common（与现代 GCC 默认一致），未初始化全局直接进 .bss。
 #
 # 设置 ALLOW_UNPATCHED_FATFS=1 可跳过体积校验（不建议）。
 #=============================================================================
 set -u
 
 echo "=========================================="
-echo "FatFs Chinese LFN patch script (ISR edition v12)"
+echo "FatFs Chinese LFN patch script (ISR edition v13)"
 PS2SDK="${PS2SDK:-/usr/local/ps2dev/ps2sdk}"
 WORKSPACE="${GITHUB_WORKSPACE:-$PWD}"
 ALLOW_UNPATCHED_FATFS="${ALLOW_UNPATCHED_FATFS:-0}"
@@ -510,6 +514,12 @@ find "$FATSRC" -maxdepth 4 -name '*.[ch]' -exec touch {} + 2>/dev/null || true
 
 MAKE_FLAGS="IOP_TOOL_PREFIX=$IOPP CC=$HOSTCC $MAKE_FLAGS"
 MAKE_FLAGS="$MAKE_FLAGS IOP_WARNFLAGS=-Wall IOP_DBGINFOFLAGS=-gdwarf-2"
+# 老工具链 GCC 3.2.3 默认 -fcommon，未初始化的全局变量会进 COMMON 段；而 binutils 2.14
+# 在 -dc -r（可重定位）链接下不会把 COMMON 分配进 .bss，老 srxfixup --irx1 因此报
+# "unallocated variable"。加 -fno-common 让未初始化全局直接进 .bss（已分配段），
+# 与现代 GCC 默认行为一致，srxfixup 不再报错。IOP_CFLAGS 末尾自带 $(IOP_CFLAGS) 追加，
+# 故在 make 命令行传 IOP_CFLAGS=-fno-common 会拼到完整参数后、不会覆盖 -D_IOP/-G0 等。
+MAKE_FLAGS="$MAKE_FLAGS IOP_CFLAGS=-fno-common"
 [ -n "$EEP" ] && MAKE_FLAGS="$MAKE_FLAGS EE_TOOL_PREFIX=$EEP"
 echo "make flags: $MAKE_FLAGS"
 
