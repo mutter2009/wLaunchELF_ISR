@@ -1,7 +1,7 @@
 #!/bin/bash
 #=============================================================================
 # Patch FatFs for Chinese (GBK / CP936) long file names on FAT32 + exFAT
-# (wLaunchELF_ISR 专用版 v13)
+# (wLaunchELF_ISR 专用版 v14)
 #-----------------------------------------------------------------------------
 # ISR 架构关键点：embed.make 从仓库内 iop/__precompiled/bdmfs_fatfs.irx 把文件
 # 系统驱动嵌入 ELF（EXFAT=1 与否用的都是同一个文件）。因此必须把重编产物覆盖到
@@ -28,13 +28,19 @@
 #        默认 -fcommon，未初始化全局进 COMMON 段；binutils 2.14 在 -dc -r 下不把
 #        COMMON 分配进 .bss，老 srxfixup --irx1 因此报未分配变量。给 bdmfs_fatfs 的
 #        IOP 编译加 -fno-common（与现代 GCC 默认一致），未初始化全局直接进 .bss。
+#   v14: 修 v13 的回归。v13 在 make 命令行传 IOP_CFLAGS=-fno-common，但 GNU make 中
+#        命令行赋值会整体覆盖 Rules.make 里的 "IOP_CFLAGS := ..." := 整行，把原定义
+#        （含 -D_IOP/-G0 与所有 -I 头文件路径）一并冲掉，导致编译找不到 bdm.h/intrman.h
+#        等头文件。改为就地 sed 改 iop/Rules.make，在原有 IOP_CFLAGS 定义里追加上
+#        -fno-common，完整保留既有 flag 与 include 路径。已在 v1.0 镜像实测：头文件可
+#        找到、fs_driver_mount_info 进 .bss（B）、链接阶段不再触发 srxfixup 报错。
 #
 # 设置 ALLOW_UNPATCHED_FATFS=1 可跳过体积校验（不建议）。
 #=============================================================================
 set -u
 
 echo "=========================================="
-echo "FatFs Chinese LFN patch script (ISR edition v13)"
+echo "FatFs Chinese LFN patch script (ISR edition v14)"
 PS2SDK="${PS2SDK:-/usr/local/ps2dev/ps2sdk}"
 WORKSPACE="${GITHUB_WORKSPACE:-$PWD}"
 ALLOW_UNPATCHED_FATFS="${ALLOW_UNPATCHED_FATFS:-0}"
@@ -514,12 +520,29 @@ find "$FATSRC" -maxdepth 4 -name '*.[ch]' -exec touch {} + 2>/dev/null || true
 
 MAKE_FLAGS="IOP_TOOL_PREFIX=$IOPP CC=$HOSTCC $MAKE_FLAGS"
 MAKE_FLAGS="$MAKE_FLAGS IOP_WARNFLAGS=-Wall IOP_DBGINFOFLAGS=-gdwarf-2"
-# 老工具链 GCC 3.2.3 默认 -fcommon，未初始化的全局变量会进 COMMON 段；而 binutils 2.14
-# 在 -dc -r（可重定位）链接下不会把 COMMON 分配进 .bss，老 srxfixup --irx1 因此报
-# "unallocated variable"。加 -fno-common 让未初始化全局直接进 .bss（已分配段），
-# 与现代 GCC 默认行为一致，srxfixup 不再报错。IOP_CFLAGS 末尾自带 $(IOP_CFLAGS) 追加，
-# 故在 make 命令行传 IOP_CFLAGS=-fno-common 会拼到完整参数后、不会覆盖 -D_IOP/-G0 等。
-MAKE_FLAGS="$MAKE_FLAGS IOP_CFLAGS=-fno-common"
+# 老工具链 GCC 3.2.3 默认 -fcommon，未初始化的全局变量（如 fs_driver_mount_info）会进
+# COMMON 段；而 binutils 2.14 在 -dc -r（可重定位）链接下不会把 COMMON 分配进 .bss，
+# 老 srxfixup --irx1 因此对不在“已分配段”的符号报 "unallocated variable"。加 -fno-common
+# 让未初始化全局直接进 .bss（已分配段），与现代 GCC 默认行为一致，srxfixup 不再报错。
+#
+# 关键坑：iop/Rules.make 里 IOP_CFLAGS 是 “IOP_CFLAGS := -D_IOP -fno-builtin -G0 ... $(IOP_CFLAGS)”
+# 的 := 立即赋值。GNU make 中「命令行赋值会整体覆盖 := 整行」——若在 make 命令行传
+# “IOP_CFLAGS=-fno-common”，会把原定义（含 -D_IOP/-G0 以及所有 -I 头文件路径）整个冲掉，
+# 导致编译时找不到 bdm.h/intrman.h 等头文件。所以不能走命令行覆盖，必须就地改 Rules.make：
+# 在原有 IOP_CFLAGS 定义里追加上 -fno-common，从而完整保留既有 flag 与 include 路径。
+RULES_MAKE="$PS2SDKSRC/iop/Rules.make"
+if [ -f "$RULES_MAKE" ]; then
+  if grep -qE 'IOP_CFLAGS := .*-fno-builtin -G0' "$RULES_MAKE"; then
+    sed -i -E 's|^(IOP_CFLAGS := -D_IOP -fno-builtin -G0)( .*)$|\1 -fno-common\2|' "$RULES_MAKE"
+    echo "OK: appended -fno-common to IOP_CFLAGS in $RULES_MAKE"
+  else
+    echo "WARN: IOP_CFLAGS line not in expected form; falling back to command-line IOP_CFLAGS=-fno-common" >&2
+    MAKE_FLAGS="$MAKE_FLAGS IOP_CFLAGS=-fno-common"
+  fi
+else
+  echo "WARN: $RULES_MAKE not found; falling back to command-line IOP_CFLAGS=-fno-common" >&2
+  MAKE_FLAGS="$MAKE_FLAGS IOP_CFLAGS=-fno-common"
+fi
 [ -n "$EEP" ] && MAKE_FLAGS="$MAKE_FLAGS EE_TOOL_PREFIX=$EEP"
 echo "make flags: $MAKE_FLAGS"
 
