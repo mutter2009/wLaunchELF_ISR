@@ -1,7 +1,7 @@
 #!/bin/bash
 #=============================================================================
 # Patch FatFs for Chinese (GBK / CP936) long file names on FAT32 + exFAT
-# (wLaunchELF_ISR 专用版 v10)
+# (wLaunchELF_ISR 专用版 v11)
 #-----------------------------------------------------------------------------
 # ISR 架构关键点：embed.make 从仓库内 iop/__precompiled/bdmfs_fatfs.irx 把文件
 # 系统驱动嵌入 ELF（EXFAT=1 与否用的都是同一个文件）。因此必须把重编产物覆盖到
@@ -18,17 +18,21 @@
 #   v9 : 就地修补 master clone 的 IOP linkfile（去 SUBALIGN + _gp 移入 .data）。
 #        但 master 是滚动分支，不同时刻结构不一致，补丁命中不全，仍偶发
 #        "undefined symbol _gp"。
-#   v10: 不再实时修补 master 的 linkfile。仓库内置一份经过验证、兼容老工具链
-#        (GCC 3.2.3 / binutils 2.14) 的完整 IOP linkfile
-#        (scripts/ci/iop_linkfile_a9vg)，直接覆盖 master clone 的 linkfile 并让
-#        IOP_LINKFILE 指向它。完全不依赖 master 的实时结构，确定性最高。
+#   v11: 修正 v10 链接脚本本身的 bug。v10 把 "_gp" 写成 .data 段内的
+#        PROVIDE(_gp = . + 0x7ff0)，但 binutils 2.14 的 iop-ld 不认这种写法，
+#        导致 _gp 始终是 undefined symbol，链接报 "undefined symbol `_gp'
+#        referenced in expression"。正确做法（已用 ps2dev/ps2dev:v1.0 镜像实测）：
+#        (a) 去掉所有 SUBALIGN；(b) _gp 用小数据段(.gp)内的普通赋值定义；
+#        (c) _text_size/_data_size/_bss_size 在 SECTIONS 之前用普通赋值定义为常量
+#        （iop-ld mipsirx 仿真会无条件自动插入 .iopmod 段并 LONG() 引用这四个符号，
+#        -dc -r 下前向引用必须提前定义）。
 #
 # 设置 ALLOW_UNPATCHED_FATFS=1 可跳过体积校验（不建议）。
 #=============================================================================
 set -u
 
 echo "=========================================="
-echo "FatFs Chinese LFN patch script (ISR edition v10)"
+echo "FatFs Chinese LFN patch script (ISR edition v11)"
 PS2SDK="${PS2SDK:-/usr/local/ps2dev/ps2sdk}"
 WORKSPACE="${GITHUB_WORKSPACE:-$PWD}"
 ALLOW_UNPATCHED_FATFS="${ALLOW_UNPATCHED_FATFS:-0}"
@@ -258,10 +262,14 @@ MAKE_FLAGS=""
 #   时刻的 master 结构不一致导致补丁命中不全。
 #
 #   解决方案：仓库自带一份经过验证、兼容老工具链 (GCC 3.2.3 / binutils 2.14，
-#   即 ps2dev/ps2dev:v1.0 镜像) 的完整 IOP linkfile（scripts/ci/iop_linkfile_a9vg）：
-#     - 无 SUBALIGN(...)
-#     - PROVIDE(_gp = . + 0x7ff0) 在 .data 段内部、_fdata 之后（用 location
-#       counter 计算，老 ld 稳定可求）
+#   即 ps2dev/ps2dev:v1.0 镜像) 的完整 IOP linkfile（scripts/ci/iop_linkfile_a9vg）。
+#   该脚本已在 v1.0 镜像里用真实 iop-ld 实测可链接，关键点：
+#     - 无 SUBALIGN(...)（老 ld 会 parse error）
+#     - _gp 用小数据段(.gp)内的普通赋值 "_gp = . + 0x7ff0" 定义（PROVIDE 写法
+#       在 binutils 2.14 下不会真正定义 _gp）
+#     - _text_size/_data_size/_bss_size 在 SECTIONS 之前用普通赋值定义成常量
+#       （iop-ld mipsirx 仿真会无条件自动插入 .iopmod 段并 LONG() 引用这四个符号，
+#       -dc -r 下前向引用必须提前定义；最终 iopmod 头由 srxfixup 重写）
 #   直接把它复制到 master clone 的 linkfile 路径并覆盖，再让 IOP_LINKFILE 指向它。
 #   这样完全不依赖 master 的实时结构，确定性最高。
 # ---------------------------------------------------------------------------
@@ -285,11 +293,17 @@ if grep -qE 'SUBALIGN\([0-9]' "$LINKFILE"; then
   echo "ERROR: installed linkfile unexpectedly contains SUBALIGN syntax" >&2
   exit 1
 fi
-if ! grep -qE 'PROVIDE\(_gp = \. \+ 0x7ff0\)' "$LINKFILE"; then
-  echo "ERROR: installed linkfile missing _gp inside .data section" >&2
+# 老 binutils 2.14 要求：_gp 必须用小数据段(.gp)内的普通赋值 "_gp = . + 0x7ff0" 定义
+if ! grep -qE '_gp = \. \+ 0x7ff0' "$LINKFILE"; then
+  echo "ERROR: installed linkfile missing '_gp = . + 0x7ff0' inside .gp section" >&2
   exit 1
 fi
-echo "OK: IOP linkfile installed (SUBALIGN-free, _gp inside .data)."
+# iop-ld mipsirx 自动插入的 .iopmod 段会 LONG() 引用这三个 size 符号，必须提前定义
+if ! grep -qE '_text_size = 0;' "$LINKFILE"; then
+  echo "ERROR: installed linkfile missing top-level _text_size constant" >&2
+  exit 1
+fi
+echo "OK: IOP linkfile installed (SUBALIGN-free, _gp in .gp section, size symbols defined)."
 export IOP_LINKFILE="$LINKFILE"
 MAKE_FLAGS="$MAKE_FLAGS IOP_LINKFILE=$LINKFILE"
 echo "IOP_LINKFILE=$IOP_LINKFILE"
