@@ -26,10 +26,12 @@ jobs:
   #   EE 构建时 embed.make 直接嵌入，不再从源码重编。这与 R3Z（用现代工具链 +
   #   预编译驱动）能识别 U 盘的做法一致。
   #
-  #   本 workflow 一次产出 6 个版本：
-  #     带背景图: BOOT-EXFAT-MX4SIO.ELF / BOOT-EXFAT-MMCE.ELF
-  #               BOOT-EXFAT-MMCE-XFROM.ELF / BOOT-EXFAT-MX4SIO-XFROM.ELF
-  #     无背景浅灰: BOOT-EXFAT-MX4SIO-NOBG.ELF / BOOT-EXFAT-MMCE-NOBG.ELF
+  #   本 workflow 一次产出 8 个版本：
+  #     带背景图: BOOT-EXFAT.ELF(无外设标志) / BOOT-EXFAT-MX4SIO.ELF
+  #               BOOT-EXFAT-MMCE.ELF / BOOT-EXFAT-MMCE-XFROM.ELF
+  #               BOOT-EXFAT-MX4SIO-XFROM.ELF
+  #     无背景浅灰: BOOT-EXFAT-NOBG.ELF(无外设标志) / BOOT-EXFAT-MX4SIO-NOBG.ELF
+  #               BOOT-EXFAT-MMCE-NOBG.ELF
   #   （MX4SIO 与 MMCE 插在同一记忆卡槽、不能共存，故分开两个版本；XFROM 仅带背景）
   #===========================================================================
   build:
@@ -53,32 +55,42 @@ jobs:
           chmod +x scripts/ci/patch_fatfs_chinese.sh
           bash scripts/ci/patch_fatfs_chinese.sh
 
-      - name: Build 1/6  BOOT-EXFAT-MX4SIO.ELF (带背景图)
+      - name: Build 1/8  BOOT-EXFAT.ELF (无外设标志, 带背景图)
+        run: |
+          make rebuild EXFAT=1 BG=1
+          mkdir -p out && cp -f BOOT*.ELF out/
+
+      - name: Build 2/8  BOOT-EXFAT-MX4SIO.ELF (带背景图)
         run: |
           make rebuild EXFAT=1 MX4SIO=1 BG=1
           mkdir -p out && cp -f BOOT*.ELF out/
 
-      - name: Build 2/6  BOOT-EXFAT-MMCE.ELF (带背景图)
+      - name: Build 3/8  BOOT-EXFAT-MMCE.ELF (带背景图)
         run: |
           make rebuild EXFAT=1 MMCE=1 BG=1
           mkdir -p out && cp -f BOOT*.ELF out/
 
-      - name: Build 3/6  BOOT-EXFAT-MMCE-XFROM.ELF (带背景图)
+      - name: Build 4/8  BOOT-EXFAT-MMCE-XFROM.ELF (带背景图)
         run: |
           make rebuild EXFAT=1 MMCE=1 XFROM=1 BG=1
           mkdir -p out && cp -f BOOT*.ELF out/
 
-      - name: Build 4/6  BOOT-EXFAT-MX4SIO-XFROM.ELF (带背景图)
+      - name: Build 5/8  BOOT-EXFAT-MX4SIO-XFROM.ELF (带背景图)
         run: |
           make rebuild EXFAT=1 MX4SIO=1 XFROM=1 BG=1
           mkdir -p out && cp -f BOOT*.ELF out/
 
-      - name: Build 5/6  BOOT-EXFAT-MX4SIO-NOBG.ELF (无背景浅灰)
+      - name: Build 6/8  BOOT-EXFAT-NOBG.ELF (无外设标志, 无背景浅灰)
+        run: |
+          make rebuild EXFAT=1 BG=0
+          mkdir -p out && cp -f BOOT*.ELF out/
+
+      - name: Build 7/8  BOOT-EXFAT-MX4SIO-NOBG.ELF (无背景浅灰)
         run: |
           make rebuild EXFAT=1 MX4SIO=1 BG=0
           mkdir -p out && cp -f BOOT*.ELF out/
 
-      - name: Build 6/6  BOOT-EXFAT-MMCE-NOBG.ELF (无背景浅灰)
+      - name: Build 8/8  BOOT-EXFAT-MMCE-NOBG.ELF (无背景浅灰)
         run: |
           make rebuild EXFAT=1 MMCE=1 BG=0
           mkdir -p out && cp -f BOOT*.ELF out/
