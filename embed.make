@@ -3,11 +3,17 @@ ifeq ($(MX4SIO),0) # no mx4sio? use ps2dev:1.0 drivers
   MCMAN_SOURCE = $(PS2SDK)/iop/irx/mcman.irx
   MCSERV_SOURCE = $(PS2SDK)/iop/irx/mcserv.irx
   SIO2MAN_SOURCE = $(PS2SDK)/iop/irx/sio2man.irx
+  PADMAN_SOURCE = $(PS2SDK)/iop/irx/padman.irx
 else # if we have mx4sio use newer IRX to avoid deadlocks when opening common memory card
   $(info using latest mc drivers)
+  # 注意：MX4SIO 分支的 sio2man/mcman/mcserv/mx4sio_bd/padman 必须全部来自同一份
+  # ps2sdk 源码 + 同一工具链（iop/__precompiled/）。padman 若混用镜像自带的另一
+  # 版本，会在启动时与新版 sio2man 死锁 → 手柄无响应（v25 实机翻车根因）。
+  $(info using latest mc/pad drivers)
   MCMAN_SOURCE = iop/__precompiled/mcman.irx
   MCSERV_SOURCE = iop/__precompiled/mcserv.irx
   SIO2MAN_SOURCE = iop/__precompiled/sio2man.irx
+  PADMAN_SOURCE = iop/__precompiled/padman.irx
 endif
 
 
@@ -151,7 +157,7 @@ $(EE_OBJS_DIR)libds34bt.a: iop/ds34bt/ee/libds34bt.a
 $(EE_ASM_DIR)ds34bt.s: iop/ds34bt.irx | $(EE_ASM_DIR)
 	$(BIN2S) $< $@ ds34bt_irx
 
-$(EE_ASM_DIR)padman.s: $(PS2SDK)/iop/irx/padman.irx | $(EE_ASM_DIR)
+$(EE_ASM_DIR)padman.s: $(PADMAN_SOURCE) | $(EE_ASM_DIR)
 	$(BIN2S) $< $@ padman_irx
 
 ifeq ($(SMB),1)

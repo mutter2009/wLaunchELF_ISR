@@ -49,6 +49,7 @@ min_size() {
     usbmass_bd.irx)   echo 5000 ;;
     ps2smap.irx)      echo 8000 ;;
     mx4sio_bd.irx)    echo 8000 ;;
+    padman.irx)       echo 20000 ;;
     mmceman.irx)      echo 20000 ;;
     sio2man.irx)      echo 4000 ;;
     mcman.irx)        echo 20000 ;;
