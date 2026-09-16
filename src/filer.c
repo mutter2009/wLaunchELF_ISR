@@ -3591,8 +3591,15 @@ int setFileList(const char *path, const char *ext, FILEINFO *files, int cnfmode)
 	nfiles = 0;
 	if (path[0] == 0) {
 		//-- Start case for browser root pseudo folder with device links --
+#ifdef MX4SIO
+		//MX4SIO：首次进入根目录也立即扫描。上游只在进入 mass 设备后才首扫，
+		//导致开机首屏看不到「MX4SIO 存储卡」，必须先进一次 USB 才出现。
+		//scan_USB_mass 内部有节流：未扫到设备前每次渲染都试，扫到后 5 秒一次。
+		scan_USB_mass();
+#else
 		if (USB_mass_scanned)  //if mass drives were scanned in earlier browsing
 			scan_USB_mass();   //then allow another scan here (timer dependent)
+#endif
 
 		strcpy(files[nfiles].name, "mc0:");
 		files[nfiles++].stats.AttrFile = sceMcFileAttrSubdir;
