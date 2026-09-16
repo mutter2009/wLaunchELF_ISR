@@ -50,6 +50,9 @@ min_size() {
     ps2smap.irx)      echo 8000 ;;
     mx4sio_bd.irx)    echo 8000 ;;
     mmceman.irx)      echo 20000 ;;
+    sio2man.irx)      echo 4000 ;;
+    mcman.irx)        echo 20000 ;;
+    mcserv.irx)       echo 5000 ;;
     *)                echo 0 ;;
   esac
 }
@@ -70,10 +73,14 @@ need_string() {
 
 rc=0
 
-echo "--- 必需 USB/BDM 驱动 (EXFAT=1 构建一定用到) ---"
-# 注意：BDM 家族（bdm / bdmfs_fatfs / usbmass_bd / mx4sio_bd）必须来自同一套源码+工具链，
-# 新旧混编会导致 ABI 错位、设备注册失败（v22 USB / v23 MX4SIO 两次翻车的根因）。
-for irx in bdm.irx bdmfs_fatfs.irx usbmass_bd.irx mx4sio_bd.irx mmceman.irx; do
+echo "--- 必需 USB/BDM/SIO 驱动 (EXFAT=1 及 MX4SIO 构建一定用到) ---"
+# 注意：BDM 家族（bdm/bdmfs_fatfs/usbmass_bd/mx4sio_bd）与 SIO 家族
+# （sio2man/mcman/mcserv，仅 MX4SIO 构建经 embed.make 的 MX4SIO=1 分支引用）
+# 必须来自同一套源码+工具链。新旧混编会导致 ABI 错位、设备注册失败或 IOP 崩溃黑屏
+# （v22 USB 看不到文件 / v24 MX4SIO 黑屏两次翻车的根因）。vx24 起这 4 个 SIO 驱动
+# 已用现代工具链（GCC 11 + 现代 ps2sdk）与 mx4sio_bd 一起重编，保证相互兼容。
+for irx in bdm.irx bdmfs_fatfs.irx usbmass_bd.irx mx4sio_bd.irx \
+          sio2man.irx mcman.irx mcserv.irx mmceman.irx; do
   f="$IRX_DIR/$irx"
   if [ ! -f "$f" ]; then
     echo "ERROR: 缺少必需驱动 $f （上游 israpps/wLaunchELF_ISR 应在 iop/__precompiled/ 提交此文件）" >&2

@@ -3534,8 +3534,8 @@ static const struct {
 } device_alias_cn[] = {
 	{"mc0:",      "记忆卡0 (mc0)"},
 	{"mc1:",      "记忆卡1 (mc1)"},
-	{"mmce0:",    "MMCE 存储卡0 (mmce0)"},
-	{"mmce1:",    "MMCE 存储卡1 (mmce1)"},
+	{"mmce0:",    "MMCE 存储卡0"},
+	{"mmce1:",    "MMCE 存储卡1"},
 	{"hdd0:",     "硬盘 (hdd0)"},
 	{"dvr_hdd0:", "DVR 硬盘 (dvr_hdd0)"},
 	{"xfrom0:",   "PSX 存储 (xfrom0)"},
